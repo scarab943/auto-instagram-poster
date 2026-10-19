@@ -21,6 +21,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL", "").strip()
+YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "").strip()
 
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
@@ -86,21 +87,29 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو
+# دانلود ویدیو (با کوکی)
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
     print(f"Downloading video {video_id}...")
     out_tmpl = str(TMP_DIR / f"{video_id}.%(ext)s")
-    result = subprocess.run(
-        [
-            "yt-dlp",
-            "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-            "--merge-output-format", "mp4",
-            "-o", out_tmpl,
-            f"https://www.youtube.com/watch?v={video_id}",
-        ],
-        capture_output=True, text=True, timeout=1200,
-    )
+    
+    cookies_path = TMP_DIR / "cookies.txt"
+    if YOUTUBE_COOKIES:
+        cookies_path.write_text(YOUTUBE_COOKIES)
+
+    cmd = [
+        "yt-dlp",
+        "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+        "--merge-output-format", "mp4",
+        "--no-check-certificates",
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "-o", out_tmpl,
+        f"https://www.youtube.com/watch?v={video_id}",
+    ]
+    if cookies_path.exists():
+        cmd.extend(["--cookies", str(cookies_path)])
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
     if result.returncode != 0:
         raise RuntimeError(f"Download failed: {result.stderr[-500:]}")
     for f in TMP_DIR.glob(f"{video_id}.*"):
@@ -200,7 +209,6 @@ def split_and_subtitle(video_path, srt_path, duration):
         end = min((i + 1) * part_duration, duration)
         out_path = str(TMP_DIR / f"part_{i+1}.mp4")
 
-        # زیرنویس با استایل مدرن
         vf = (
             f"subtitles={srt_path}:force_style="
             f"'FontName=Vazir,FontSize=18,PrimaryColour=&H0000FFFF,"
@@ -283,7 +291,6 @@ def main():
 
     state = load_state()
 
-    # ساختن صف در اولین اجرا
     if not state["queue"]:
         print("First run: building queue...")
         videos = fetch_channel_videos(YOUTUBE_CHANNEL_URL)
@@ -295,7 +302,6 @@ def main():
         save_state(state)
         telegram(f"✅ صف ساخته شد: {len(videos)} ویدیو در صف")
 
-    # اتمام صف
     if state["queue_index"] >= len(state["queue"]):
         telegram("✅ تمام ویدیوها پست شدن!")
         print("Queue finished.")
@@ -305,29 +311,20 @@ def main():
     print(f"Processing: {video['id']} - {video['title']}")
 
     try:
-        # ۱. دانلود
         video_path = download_video(video["id"])
-
-        # ۲. صدا + Whisper
         audio_path = extract_audio(video_path)
         segments = transcribe(audio_path)
-
-        # ۳. ترجمه
         translated = translate_segments(segments)
 
-        # ۴. SRT
         srt_path = str(TMP_DIR / "sub.srt")
         build_srt(translated, srt_path)
 
-        # ۵. تقسیم + زیرنویس
         duration = get_duration(video_path)
         parts = split_and_subtitle(video_path, srt_path, duration)
 
-        # ۶. کپشن با Gemini
         full_text = " ".join(s["text"] for s in translated)
         caption = generate_caption(video["title"], full_text)
 
-        # ۷. پست در اینستاگرام
         media_ids = []
         for i, part in enumerate(parts, 1):
             part_caption = f"قسمت {i} از {len(parts)}\n\n{caption}"
@@ -336,7 +333,6 @@ def main():
             print(f"Posted part {i}/{len(parts)}: {media_id}")
             time.sleep(60)
 
-        # ۸. آمار
         state["stats"]["success"] += 1
         state["queue_index"] += 1
         save_state(state)
