@@ -21,8 +21,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL", "").strip()
+YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "").strip()
 
-# ← اینجا آیدی دیپلوی خودت رو بذار (همون AKfycbx...)
+# ← آدرس Apps Script خودت
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxVbY5-Kz4tLjx8KjiVBpULGA2xHLovBzSNfd7KO3VN8N7iDplaocu_Uv-vpRB_qSDH9g/exec"
 APPS_SCRIPT_AUTH_KEY = "reza81697"
 
@@ -103,38 +104,49 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو از طریق Apps Script
+# دانلود ویدیو با کوکی و Apps Script
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
     print(f"Downloading video {video_id} via Apps Script...")
     video_url = f"https://www.youtube.com/watch?v={video_id}"
-    
+
     try:
-        # ۱. دریافت لینک مستقیم از طریق yt-dlp (فقط لینک، بدون دانلود)
-        result = subprocess.run(
-            ["yt-dlp", "--get-url", "--no-warnings", "-f", "best[height<=720]", video_url],
-            capture_output=True, text=True, timeout=60,
-        )
+        # ۱. آماده‌سازی فایل کوکی
+        cookies_path = TMP_DIR / "cookies.txt"
+        if YOUTUBE_COOKIES:
+            cookies_path.write_text(YOUTUBE_COOKIES)
+            print("Using cookies for yt-dlp.")
+
+        # ۲. گرفتن لینک مستقیم با yt-dlp (با کوکی)
+        cmd = [
+            "yt-dlp", "--get-url", "--no-warnings",
+            "-f", "best[height<=720]",
+            video_url,
+        ]
+        if cookies_path.exists():
+            cmd.extend(["--cookies", str(cookies_path)])
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0 or not result.stdout.strip():
             raise RuntimeError(f"yt-dlp failed: {result.stderr[-500:]}")
-        
+
         direct_url = result.stdout.strip().split("\n")[0]
-        print(f"Direct URL obtained.")
-        
-        # ۲. دانلود فایل از طریق Apps Script
+        print("Direct URL obtained.")
+
+        # ۳. دانلود فایل از طریق Apps Script
         status, headers, content = apps_script_request(
             direct_url, method="GET",
             headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-49999999"}
         )
-        
+
         if status not in (200, 206):
             raise RuntimeError(f"Download failed: status {status}")
-        
+
         output_path = TMP_DIR / f"{video_id}.mp4"
         output_path.write_bytes(content)
         print(f"Downloaded: {output_path} ({len(content)} bytes)")
         return str(output_path)
-        
+
     except Exception as e:
         print(f"Download error: {e}")
         raise
