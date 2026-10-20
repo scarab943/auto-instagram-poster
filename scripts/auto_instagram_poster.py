@@ -4,6 +4,7 @@ import time
 import subprocess
 import tempfile
 import shutil
+import base64
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -20,7 +21,10 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL", "").strip()
-YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "").strip()
+
+# ← اینجا آیدی دیپلوی خودت رو بذار (همون AKfycbx...)
+APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxVbY5-Kz4tLjx8KjiVBpULGA2xHLovBzSNfd7KO3VN8N7iDplaocu_Uv-vpRB_qSDH9g/exec"
+APPS_SCRIPT_AUTH_KEY = "reza81697"
 
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
@@ -30,21 +34,16 @@ GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
 # ═══════════════════════════════════════════════════
-# استیت (صف + آمار)
+# ابزارهای کمکی
 # ═══════════════════════════════════════════════════
 def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
     return {"queue": [], "queue_index": 0, "stats": {"success": 0, "failed": 0}}
 
-
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
 
-
-# ═══════════════════════════════════════════════════
-# تلگرام (گزارش)
-# ═══════════════════════════════════════════════════
 def telegram(msg):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -59,7 +58,25 @@ def telegram(msg):
 
 
 # ═══════════════════════════════════════════════════
-# گرفتن لیست ویدیوها از کانال (از قدیمی‌ترین)
+# Apps Script Proxy
+# ═══════════════════════════════════════════════════
+def apps_script_request(url, method="GET", headers=None):
+    payload = {
+        "k": APPS_SCRIPT_AUTH_KEY,
+        "m": method,
+        "u": url,
+        "h": headers or {"User-Agent": "Mozilla/5.0"},
+    }
+    r = requests.post(APPS_SCRIPT_URL, json=payload, timeout=120)
+    r.raise_for_status()
+    data = r.json()
+    if "e" in data:
+        raise RuntimeError(f"Apps Script error: {data['e']}")
+    return data.get("s"), data.get("h"), base64.b64decode(data.get("b", ""))
+
+
+# ═══════════════════════════════════════════════════
+# گرفتن لیست ویدیوها
 # ═══════════════════════════════════════════════════
 def fetch_channel_videos(channel_url):
     print(f"Fetching channel videos from: {channel_url}")
@@ -86,35 +103,41 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو (با کوکی)
+# دانلود ویدیو از طریق Apps Script
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
-    print(f"Downloading video {video_id}...")
-    out_tmpl = str(TMP_DIR / f"{video_id}.%(ext)s")
-
-    cmd = [
-        "yt-dlp",
-        "-f", "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
-        "--merge-output-format", "mp4",
-        "--no-check-certificates",
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "-o", out_tmpl,
-        f"https://www.youtube.com/watch?v={video_id}",
-    ]
-
-    if YOUTUBE_COOKIES:
-        cookies_path = TMP_DIR / "cookies.txt"
-        cookies_path.write_text(YOUTUBE_COOKIES)
-        cmd.extend(["--cookies", str(cookies_path)])
-        print("Using cookies for download.")
-
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
-    if result.returncode != 0:
-        raise RuntimeError(f"Download failed: {result.stderr[-500:]}")
-    for f in TMP_DIR.glob(f"{video_id}.*"):
-        if f.suffix in (".mp4", ".mkv", ".webm"):
-            return str(f)
-    raise RuntimeError("Downloaded file not found")
+    print(f"Downloading video {video_id} via Apps Script...")
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+    
+    try:
+        # ۱. دریافت لینک مستقیم از طریق yt-dlp (فقط لینک، بدون دانلود)
+        result = subprocess.run(
+            ["yt-dlp", "--get-url", "--no-warnings", "-f", "best[height<=720]", video_url],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            raise RuntimeError(f"yt-dlp failed: {result.stderr[-500:]}")
+        
+        direct_url = result.stdout.strip().split("\n")[0]
+        print(f"Direct URL obtained.")
+        
+        # ۲. دانلود فایل از طریق Apps Script
+        status, headers, content = apps_script_request(
+            direct_url, method="GET",
+            headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-49999999"}
+        )
+        
+        if status not in (200, 206):
+            raise RuntimeError(f"Download failed: status {status}")
+        
+        output_path = TMP_DIR / f"{video_id}.mp4"
+        output_path.write_bytes(content)
+        print(f"Downloaded: {output_path} ({len(content)} bytes)")
+        return str(output_path)
+        
+    except Exception as e:
+        print(f"Download error: {e}")
+        raise
 
 
 # ═══════════════════════════════════════════════════
@@ -129,7 +152,6 @@ def extract_audio(video_path):
     )
     return audio_path
 
-
 def transcribe(audio_path):
     print("Transcribing with Whisper...")
     model = WhisperModel("small", device="cpu", compute_type="int8")
@@ -138,7 +160,7 @@ def transcribe(audio_path):
 
 
 # ═══════════════════════════════════════════════════
-# ترجمه (MyMemory)
+# ترجمه
 # ═══════════════════════════════════════════════════
 def translate_text(text):
     if not text.strip():
@@ -155,7 +177,6 @@ def translate_text(text):
         time.sleep(3)
     return text
 
-
 def translate_segments(segments):
     print(f"Translating {len(segments)} segments...")
     result = []
@@ -167,7 +188,7 @@ def translate_segments(segments):
 
 
 # ═══════════════════════════════════════════════════
-# ساخت SRT
+# SRT
 # ═══════════════════════════════════════════════════
 def format_time(seconds):
     ms = int((seconds - int(seconds)) * 1000)
@@ -175,7 +196,6 @@ def format_time(seconds):
     m = int(seconds) // 60 % 60
     h = int(seconds) // 3600
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
 
 def build_srt(segments, output_path):
     with open(output_path, "w", encoding="utf-8") as f:
@@ -186,7 +206,7 @@ def build_srt(segments, output_path):
 
 
 # ═══════════════════════════════════════════════════
-# تقسیم ویدیو به قطعات
+# تقسیم و زیرنویس
 # ═══════════════════════════════════════════════════
 def get_duration(video_path):
     r = subprocess.run(
@@ -196,11 +216,10 @@ def get_duration(video_path):
     )
     return float(r.stdout.strip())
 
-
 def split_and_subtitle(video_path, srt_path, duration):
     num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) + (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
     part_duration = duration / num_parts
-    print(f"Splitting into {num_parts} parts of ~{part_duration:.1f}s")
+    print(f"Splitting into {num_parts} parts")
 
     outputs = []
     for i in range(num_parts):
@@ -232,36 +251,20 @@ def split_and_subtitle(video_path, srt_path, duration):
 
 
 # ═══════════════════════════════════════════════════
-# Gemini: کپشن و هشتگ
+# کپشن با Gemini
 # ═══════════════════════════════════════════════════
 def generate_caption(video_title, translated_text):
-    fallback = (
-        f"🎬 {video_title}\n\n"
-        f"{translated_text[:400]}...\n\n"
-        f"🔔 ما رو دنبال کنید\n"
-        f"#داستان #انگیزشی #پادکست #فارسی"
-    )
+    fallback = f"🎬 {video_title}\n\n{translated_text[:400]}...\n\n#داستان #انگیزشی"
     if not GEMINI_CLIENT:
         return fallback
     prompt = f"""تو یک کپی‌رایتر حرفه‌ای برای اینستاگرام هستی.
-یه ویدیو داستانی دوبله شده با این عنوان و متن:
 عنوان: {video_title}
-متن (بخشی از ترجمه): {translated_text[:800]}
-
-یه کپشن جذاب فارسی بنویس.
-شرایط:
-- لحن صمیمی و الهام‌بخش
-- اشاره به موضوع داستان
-- ۵-۸ ایموجی
-- آخرش: 🔔 ما رو دنبال کنید
-- ۵ تا ۸ هشتگ مرتبط فارسی و انگلیسی
-
-فقط متن کپشن و هشتگ‌ها رو برگردون. کمتر از ۱۵۰۰ کاراکتر."""
+متن: {translated_text[:800]}
+یه کپشن جذاب فارسی با ۵-۸ ایموجی و ۵-۸ هشتگ بنویس. فقط کپشن."""
     try:
         r = GEMINI_CLIENT.models.generate_content(model="gemini-flash-latest", contents=prompt)
         return r.text.strip()
-    except Exception as e:
-        print(f"Gemini error: {e}")
+    except Exception:
         return fallback
 
 
@@ -294,16 +297,15 @@ def main():
         print("First run: building queue...")
         videos = fetch_channel_videos(YOUTUBE_CHANNEL_URL)
         if not videos:
-            telegram("❌ هیچ ویدیویی توی کانال پیدا نشد.")
+            telegram("❌ هیچ ویدیویی پیدا نشد.")
             return
         state["queue"] = videos
         state["queue_index"] = 0
         save_state(state)
-        telegram(f"✅ صف ساخته شد: {len(videos)} ویدیو در صف")
+        telegram(f"✅ صف ساخته شد: {len(videos)} ویدیو")
 
     if state["queue_index"] >= len(state["queue"]):
         telegram("✅ تمام ویدیوها پست شدن!")
-        print("Queue finished.")
         return
 
     video = state["queue"][state["queue_index"]]
@@ -324,11 +326,9 @@ def main():
         full_text = " ".join(s["text"] for s in translated)
         caption = generate_caption(video["title"], full_text)
 
-        media_ids = []
         for i, part in enumerate(parts, 1):
             part_caption = f"قسمت {i} از {len(parts)}\n\n{caption}"
             media_id = upload_to_instagram(part, part_caption)
-            media_ids.append(media_id)
             print(f"Posted part {i}/{len(parts)}: {media_id}")
             time.sleep(60)
 
@@ -339,10 +339,7 @@ def main():
         telegram(
             f"✅ ویدیو پست شد: {video['title']}\n"
             f"📱 تعداد قطعات: {len(parts)}\n"
-            f"📊 آمار کلی:\n"
-            f"   • موفق: {state['stats']['success']}\n"
-            f"   • ناموفق: {state['stats']['failed']}\n"
-            f"   • باقی‌مانده در صف: {len(state['queue']) - state['queue_index']}"
+            f"📊 موفق: {state['stats']['success']}, ناموفق: {state['stats']['failed']}"
         )
 
     except Exception as e:
