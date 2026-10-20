@@ -1,7 +1,6 @@
 import os
 import json
 import time
-import re
 import subprocess
 import tempfile
 import shutil
@@ -25,11 +24,14 @@ YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "").strip()
 
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
-MAX_SEGMENT_DURATION = 180
+MAX_SEGMENT_DURATION = 180  # ثانیه (۳ دقیقه)
 
 GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
+# ═══════════════════════════════════════════════════
+# استیت (صف + آمار)
+# ═══════════════════════════════════════════════════
 def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
@@ -40,6 +42,9 @@ def save_state(state):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
 
 
+# ═══════════════════════════════════════════════════
+# تلگرام (گزارش)
+# ═══════════════════════════════════════════════════
 def telegram(msg):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -53,6 +58,9 @@ def telegram(msg):
         print(f"Telegram error: {e}")
 
 
+# ═══════════════════════════════════════════════════
+# گرفتن لیست ویدیوها از کانال (از قدیمی‌ترین)
+# ═══════════════════════════════════════════════════
 def fetch_channel_videos(channel_url):
     print(f"Fetching channel videos from: {channel_url}")
     result = subprocess.run(
@@ -77,13 +85,12 @@ def fetch_channel_videos(channel_url):
     return videos
 
 
+# ═══════════════════════════════════════════════════
+# دانلود ویدیو (با کوکی)
+# ═══════════════════════════════════════════════════
 def download_video(video_id):
     print(f"Downloading video {video_id}...")
     out_tmpl = str(TMP_DIR / f"{video_id}.%(ext)s")
-    
-    cookies_path = TMP_DIR / "cookies.txt"
-    if YOUTUBE_COOKIES:
-        cookies_path.write_text(YOUTUBE_COOKIES)
 
     cmd = [
         "yt-dlp",
@@ -94,8 +101,12 @@ def download_video(video_id):
         "-o", out_tmpl,
         f"https://www.youtube.com/watch?v={video_id}",
     ]
-    if cookies_path.exists():
+
+    if YOUTUBE_COOKIES:
+        cookies_path = TMP_DIR / "cookies.txt"
+        cookies_path.write_text(YOUTUBE_COOKIES)
         cmd.extend(["--cookies", str(cookies_path)])
+        print("Using cookies for download.")
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
     if result.returncode != 0:
@@ -106,6 +117,9 @@ def download_video(video_id):
     raise RuntimeError("Downloaded file not found")
 
 
+# ═══════════════════════════════════════════════════
+# استخراج صدا + Whisper
+# ═══════════════════════════════════════════════════
 def extract_audio(video_path):
     audio_path = str(TMP_DIR / "audio.wav")
     subprocess.run(
@@ -123,6 +137,9 @@ def transcribe(audio_path):
     return [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
 
 
+# ═══════════════════════════════════════════════════
+# ترجمه (MyMemory)
+# ═══════════════════════════════════════════════════
 def translate_text(text):
     if not text.strip():
         return ""
@@ -149,6 +166,9 @@ def translate_segments(segments):
     return result
 
 
+# ═══════════════════════════════════════════════════
+# ساخت SRT
+# ═══════════════════════════════════════════════════
 def format_time(seconds):
     ms = int((seconds - int(seconds)) * 1000)
     s = int(seconds) % 60
@@ -165,6 +185,9 @@ def build_srt(segments, output_path):
             f.write(f"{seg['text']}\n\n")
 
 
+# ═══════════════════════════════════════════════════
+# تقسیم ویدیو به قطعات
+# ═══════════════════════════════════════════════════
 def get_duration(video_path):
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -208,6 +231,9 @@ def split_and_subtitle(video_path, srt_path, duration):
     return outputs
 
 
+# ═══════════════════════════════════════════════════
+# Gemini: کپشن و هشتگ
+# ═══════════════════════════════════════════════════
 def generate_caption(video_title, translated_text):
     fallback = (
         f"🎬 {video_title}\n\n"
@@ -239,6 +265,9 @@ def generate_caption(video_title, translated_text):
         return fallback
 
 
+# ═══════════════════════════════════════════════════
+# آپلود در اینستاگرام
+# ═══════════════════════════════════════════════════
 def upload_to_instagram(video_path, caption):
     cl = Client()
     cl.login_by_sessionid(INSTAGRAM_SESSIONID)
@@ -246,6 +275,9 @@ def upload_to_instagram(video_path, caption):
     return str(media.pk)
 
 
+# ═══════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════
 def main():
     print("=" * 60)
     print("Auto Instagram Poster - Started")
