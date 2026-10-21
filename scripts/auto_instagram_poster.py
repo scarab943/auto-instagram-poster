@@ -36,12 +36,29 @@ GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
 # ═══════════════════════════════════════════════════
-# ابزارهای کمکی
+# ابزارهای کمکی (با مقاوم‌سازی load_state)
 # ═══════════════════════════════════════════════════
 def load_state():
+    default_state = {"queue": [], "queue_index": 0, "stats": {"success": 0, "failed": 0}}
     if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
-    return {"queue": [], "queue_index": 0, "stats": {"success": 0, "failed": 0}}
+        try:
+            content = STATE_FILE.read_text().strip()
+            if not content:
+                print("⚠️ state.json is empty, resetting...")
+                return default_state
+            data = json.loads(content)
+            # اطمینان از وجود کلیدهای ضروری
+            if not isinstance(data, dict) or "queue" not in data:
+                print("⚠️ state.json is invalid, resetting...")
+                return default_state
+            return data
+        except json.JSONDecodeError as e:
+            print(f"⚠️ state.json is corrupted ({e}), resetting...")
+            return default_state
+        except Exception as e:
+            print(f"⚠️ Error reading state.json ({e}), resetting...")
+            return default_state
+    return default_state
 
 
 def save_state(state):
@@ -108,10 +125,9 @@ def download_video(video_id):
     if YOUTUBE_COOKIES:
         cookies_path.write_text(YOUTUBE_COOKIES)
 
-    # مرحله 1: گرفتن لینک مستقیم با yt-dlp (فقط لینک، نه دانلود)
     FORMAT_CHAIN = [
         "best[ext=mp4]/best",
-        "18/22/17/36",  # legacy combined formats
+        "18/22/17/36",
         "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/worst",
         "worst",
     ]
@@ -144,7 +160,6 @@ def download_video(video_id):
     if not direct_url:
         raise RuntimeError("Could not get direct URL from yt-dlp")
 
-    # مرحله 2: دانلود از طریق Apps Script
     print(f"  [Download] Fetching via Apps Script...")
     try:
         status, headers, content = apps_script_request(
@@ -259,7 +274,7 @@ def split_and_subtitle(video_path, srt_path, duration):
         out_path = str(TMP_DIR / f"part_{i+1}.mp4")
 
         vf = (
-            f"scale=-2:1920,crop=1080:1920,"  # استانداردسازی به 9:16
+            f"scale=-2:1920,crop=1080:1920,"
             f"subtitles={srt_path}:force_style="
             f"'FontName=Vazir,FontSize=18,PrimaryColour=&H0000FFFF,"
             f"OutlineColour=&H80000000,BorderStyle=3,BackColour=&H80000000,"
@@ -360,7 +375,7 @@ def main():
             part_caption = f"قسمت {i} از {len(parts)}\n\n{caption}"
             media_id = upload_to_instagram(part, part_caption)
             print(f"Posted part {i}/{len(parts)}: {media_id}")
-            time.sleep(60)  # تاخیر برای جلوگیری از بلاک شدن
+            time.sleep(60)
 
         state["stats"]["success"] += 1
         state["queue_index"] += 1
