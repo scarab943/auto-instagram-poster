@@ -159,7 +159,7 @@ def extract_audio(video_path):
 def transcribe(audio_path):
     print("Transcribing with Whisper (English audio only)...")
     model = WhisperModel("small", device="cpu", compute_type="int8")
-    # زبان را روی انگلیسی قفل کردیم و دقت را بالا بردیم
+    # قفل کردن زبان روی انگلیسی برای دقت بیشتر
     segments, _ = model.transcribe(
         audio_path, 
         language="en", 
@@ -167,7 +167,7 @@ def transcribe(audio_path):
         beam_size=5
     )
     all_segs = [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
-    # حذف زیرنویس مقدمه/توضیحات اول ویدیو
+    # حذف مقدمه/توضیحات اول ویدیو
     filtered = [s for s in all_segs if s["start"] >= SKIP_INTRO_SECONDS]
     print(f"Total segments: {len(all_segs)} → after skipping intro: {len(filtered)}")
     return filtered
@@ -234,6 +234,32 @@ def build_part_srt(segments, part_start, part_end, output_path):
 
 
 # ═══════════════════════════════════════════════════
+# کپشن و خلاصه اختصاصی برای هر قسمت
+# ═══════════════════════════════════════════════════
+def generate_caption(video_title, part_text, part_num, total_parts):
+    fallback = f"🎬 {video_title}\n\nقسمت {part_num}: {part_text[:300]}...\n\n#داستان #انگیزشی #موفقیت #توسعه_فردی #انگیزه #زندگی"
+    if not GEMINI_CLIENT:
+        return fallback
+        
+    prompt = f"""تو یک کپی‌رایتر حرفه‌ای برای اینستاگرام هستی.
+این متن، مربوط به قسمت {part_num} از {total_parts} یک ویدیو است:
+"{part_text}"
+
+بر اساس محتوای همین متن، دقیقاً موارد زیر را بنویس:
+۱. یک خلاصه جذاب و کوتاه از این قسمت.
+۲. یک کپشن انگیزشی و گیرا.
+۳. حداقل ۶ هشتگ مرتبط با موضوع این قسمت.
+
+خروجی را به صورت یک متن منسجم و آماده برای پست اینستاگرام (بدون هیچ توضیح اضافه‌ای) برگردان."""
+    try:
+        r = GEMINI_CLIENT.models.generate_content(model="gemini-3.8-flash", contents=prompt)
+        return r.text.strip()
+    except Exception as e:
+        print(f"Gemini error: {e}")
+        return fallback
+
+
+# ═══════════════════════════════════════════════════
 # تقسیم و زیرنویس (بدون کات شدن - با نوار مشکی بالا و پایین)
 # ═══════════════════════════════════════════════════
 def get_duration(video_path):
@@ -245,12 +271,14 @@ def get_duration(video_path):
     return float(r.stdout.strip())
 
 
-def split_and_subtitle(video_path, translated_segments, duration):
+def split_and_subtitle(video_path, translated_segments, duration, video_title):
     num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) + (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
     part_duration = duration / num_parts
-    print(f"Splitting into {num_parts} parts (max {MAX_SEGMENT_DURATION}s each) for Instagram Reels standard.")
+    print(f"Splitting into {num_parts} parts (max {MAX_SEGMENT_DURATION}s each).")
 
     outputs = []
+    captions = []
+    
     for i in range(num_parts):
         part_start = i * part_duration
         part_end = min((i + 1) * part_duration, duration)
@@ -258,10 +286,18 @@ def split_and_subtitle(video_path, translated_segments, duration):
         out_path = str(TMP_DIR / f"part_{i+1}.mp4")
         part_srt = str(TMP_DIR / f"part_{i+1}.srt")
 
-        # ساخت SRT مخصوص این قطعه
+        # 1. استخراج متن مخصوص همین قسمت
+        part_text = " ".join([s["text"] for s in translated_segments if s["end"] > part_start and s["start"] < part_end])
+        
+        # 2. ساخت کپشن مخصوص همین قسمت
+        print(f"  [Caption] Generating caption for part {i+1}/{num_parts}...")
+        part_caption = generate_caption(video_title, part_text, i+1, num_parts)
+        captions.append(part_caption)
+
+        # 3. ساخت SRT مخصوص این قطعه
         build_part_srt(translated_segments, part_start, part_end, part_srt)
 
-        # فیلتر FFmpeg: حفظ نسبت تصویر + نوار مشکی + زیرنویس کوچک و پایین
+        # 4. فیلتر FFmpeg: حفظ نسبت تصویر + نوار مشکی + زیرنویس کوچک و پایین
         vf = (
             f"scale=1080:1920:force_original_aspect_ratio=decrease,"
             f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,"
@@ -270,7 +306,7 @@ def split_and_subtitle(video_path, translated_segments, duration):
             f"BackColour=&H80000000,Outline=1,Shadow=0,MarginV=40,Alignment=2'"
         )
 
-        # استفاده از -ss قبل از -i و -t برای دقت بالا و جلوگیری از پرش
+        # 5. برش دقیق ویدیو
         subprocess.run(
             ["ffmpeg", "-y",
              "-ss", str(part_start),
@@ -284,28 +320,9 @@ def split_and_subtitle(video_path, translated_segments, duration):
             check=True, capture_output=True, timeout=900,
         )
         outputs.append(out_path)
-        print(f"  ✅ Part {i+1}/{num_parts} built (without cropping).")
+        print(f"  ✅ Part {i+1}/{num_parts} built.")
 
-    return outputs
-
-
-# ═══════════════════════════════════════════════════
-# کپشن با Gemini
-# ═══════════════════════════════════════════════════
-def generate_caption(video_title, translated_text):
-    fallback = f"🎬 {video_title}\n\n{translated_text[:400]}...\n\n#داستان #انگیزشی"
-    if not GEMINI_CLIENT:
-        return fallback
-    prompt = f"""تو یک کپی‌رایتر حرفه‌ای برای اینستاگرام هستی.
-عنوان: {video_title}
-متن: {translated_text[:800]}
-یه کپشن جذاب و کوتاه فارسی با ۵-۸ ایموجی و ۵-۸ هشتگ مرتبط با موضوع بنویس. فقط متن کپشن و هشتگ‌ها را برگردان."""
-    try:
-        r = GEMINI_CLIENT.models.generate_content(model="gemini-3.8-flash", contents=prompt)
-        return r.text.strip()
-    except Exception as e:
-        print(f"Gemini error: {e}")
-        return fallback
+    return outputs, captions
 
 
 # ═══════════════════════════════════════════════════
@@ -358,13 +375,11 @@ def main():
         translated = translate_segments(segments)
 
         duration = get_duration(video_path)
-        parts = split_and_subtitle(video_path, translated, duration)
+        
+        # ساخت قطعات و کپشن‌های اختصاصی هر کدام
+        parts, part_captions = split_and_subtitle(video_path, translated, duration, video["title"])
 
-        full_text = " ".join(s["text"] for s in translated)
-        caption = generate_caption(video["title"], full_text)
-
-        for i, part in enumerate(parts, 1):
-            part_caption = f"قسمت {i} از {len(parts)}\n\n{caption}"
+        for i, (part, part_caption) in enumerate(zip(parts, part_captions), 1):
             media_id = upload_to_instagram(part, part_caption)
             print(f"Posted part {i}/{len(parts)}: {media_id}")
             time.sleep(60)
