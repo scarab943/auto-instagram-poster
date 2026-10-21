@@ -98,7 +98,7 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو (اصلاح شده: دو کلاینت + فرمت مطمئن)
+# دانلود ویدیو (سه استراتژی مختلف)
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
     print(f"Downloading video {video_id} via WARP proxy...")
@@ -109,36 +109,50 @@ def download_video(video_id):
     if YOUTUBE_COOKIES:
         cookies_path.write_text(YOUTUBE_COOKIES)
 
-    # اول با کلاینت default (بهترین کیفیت) و بعد با android
-    clients_to_try = ["default", "android"]
+    attempts = [
+        {
+            "name": "android",
+            "args": ["--extractor-args", "youtube:player_client=android,web_safari",
+                     "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b"],
+        },
+        {
+            "name": "ios",
+            "args": ["--extractor-args", "youtube:player_client=ios,web_safari",
+                     "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b"],
+        },
+        {
+            "name": "auto",
+            "args": ["-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b"],
+        },
+    ]
 
-    for client in clients_to_try:
-        print(f"  Trying with player_client={client}...")
-
+    for att in attempts:
+        print(f"  Trying with client={att['name']}...")
         cmd = [
             "yt-dlp",
             "--proxy", WARP_PROXY,
-            "--extractor-args", f"youtube:player_client={client}",
-            "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+            "--no-check-certificates",
             "--merge-output-format", "mp4",
             "-o", output_tpl,
             "--no-warnings",
+            "--retries", "3",
+            "--fragment-retries", "3",
+            *att["args"],
             video_url,
         ]
         if cookies_path.exists():
             cmd.extend(["--cookies", str(cookies_path)])
 
-        for attempt in range(1, 3):
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-            if r.returncode == 0:
-                for f in TMP_DIR.glob(f"{video_id}.*"):
-                    if f.suffix in (".mp4", ".mkv", ".webm"):
-                        print(f"  ✅ Downloaded: {f} ({f.stat().st_size} bytes) via {client}")
-                        return str(f)
-            print(f"    ⚠️ attempt {attempt} with {client} failed: {r.stderr[-200:]}")
-            time.sleep(5)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        if r.returncode == 0:
+            for f in TMP_DIR.glob(f"{video_id}.*"):
+                if f.suffix in (".mp4", ".mkv", ".webm"):
+                    print(f"  ✅ Downloaded: {f} ({f.stat().st_size} bytes) via {att['name']}")
+                    return str(f)
+        print(f"    ⚠️ {att['name']} failed: {r.stderr[-200:]}")
+        time.sleep(5)
 
-    raise RuntimeError("All download attempts failed with both default and android clients")
+    raise RuntimeError("All download attempts failed")
 
 
 # ═══════════════════════════════════════════════════
