@@ -47,7 +47,6 @@ def load_state():
                 print("⚠️ state.json is empty, resetting...")
                 return default_state
             data = json.loads(content)
-            # اطمینان از وجود کلیدهای ضروری
             if not isinstance(data, dict) or "queue" not in data:
                 print("⚠️ state.json is invalid, resetting...")
                 return default_state
@@ -125,25 +124,44 @@ def download_video(video_id):
     if YOUTUBE_COOKIES:
         cookies_path.write_text(YOUTUBE_COOKIES)
 
-    FORMAT_CHAIN = [
-        "best[ext=mp4]/best",
-        "18/22/17/36",
-        "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/worst",
-        "worst",
+    attempts = [
+        {
+            "name": "web_with_cookies",
+            "args": ["--extractor-args", "youtube:player_client=web,web_safari",
+                     "-f", "best[ext=mp4]/best"],
+            "use_cookies": True,
+        },
+        {
+            "name": "android_vr",
+            "args": ["--extractor-args", "youtube:player_client=android_vr",
+                     "-f", "best[ext=mp4]/best"],
+            "use_cookies": False,
+        },
+        {
+            "name": "tv_embedded",
+            "args": ["--extractor-args", "youtube:player_client=tv_embedded",
+                     "-f", "best[ext=mp4]/best"],
+            "use_cookies": False,
+        },
+        {
+            "name": "auto",
+            "args": ["-f", "best[ext=mp4]/best"],
+            "use_cookies": False,
+        },
     ]
 
     direct_url = None
-    for fmt in FORMAT_CHAIN:
+    for att in attempts:
         try:
-            print(f"  [URL] Trying format: {fmt}")
+            print(f"  [URL] Trying client={att['name']}...")
             cmd = [
                 "yt-dlp", "--get-url", "--no-warnings",
                 "--proxy", WARP_PROXY,
-                "--extractor-args", "youtube:player_client=android,ios,web_safari",
-                "-f", fmt,
+                "--no-check-certificates",
+                *att["args"],
                 video_url,
             ]
-            if cookies_path.exists():
+            if att["use_cookies"] and cookies_path.exists():
                 cmd.extend(["--cookies", str(cookies_path)])
 
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
@@ -151,14 +169,14 @@ def download_video(video_id):
                 urls = [u for u in r.stdout.strip().split("\n") if u.strip()]
                 if urls:
                     direct_url = urls[0]
-                    print(f"  ✅ Direct URL obtained (format={fmt})")
+                    print(f"  ✅ Direct URL obtained (client={att['name']})")
                     break
-            print(f"    ⚠️ format {fmt} failed: {r.stderr.strip()[-200:]}")
+            print(f"    ⚠️ client={att['name']} failed: {r.stderr.strip()[-200:]}")
         except Exception as e:
-            print(f"    ⚠️ format {fmt} error: {e}")
+            print(f"    ⚠️ client={att['name']} error: {e}")
 
     if not direct_url:
-        raise RuntimeError("Could not get direct URL from yt-dlp")
+        raise RuntimeError("Could not get direct URL from yt-dlp with any client")
 
     print(f"  [Download] Fetching via Apps Script...")
     try:
