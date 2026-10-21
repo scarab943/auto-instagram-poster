@@ -33,7 +33,7 @@ PO_TOKEN_PROVIDER_URL = "http://127.0.0.1:4416"
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
 MAX_SEGMENT_DURATION = 90   # حداکثر طول هر قطعه (ثانیه)
-MAX_CHARS_PER_SUB = 35      # حداکثر کاراکتر در هر زیرنویس (جلوگیری از طولانی شدن)
+MAX_CHARS_PER_SUB = 40      # حداکثر کاراکتر در هر زیرنویس
 
 GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -166,12 +166,11 @@ def transcribe(audio_path):
         vad_filter=True,
         beam_size=5
     )
-    # دیگر مقدمه حذف نمی‌شود (زیرنویس از ثانیه صفر شروع می‌شود)
     return [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
 
 
 # ═══════════════════════════════════════════════════
-# ترجمه
+# ترجمه و شکستن جملات
 # ═══════════════════════════════════════════════════
 def translate_text(text):
     if not text.strip():
@@ -189,29 +188,44 @@ def translate_text(text):
     return text
 
 
-def translate_segments(segments):
-    print(f"Translating {len(segments)} segments...")
-    result = []
+def merge_segments(segments, max_chars=150):
+    """ادغام سگمنت‌های کوتاه برای ترجمه بهتر"""
+    merged = []
+    current = None
     for seg in segments:
+        if current is None:
+            current = {"start": seg["start"], "end": seg["end"], "text": seg["text"]}
+        else:
+            if len(current["text"]) + len(seg["text"]) + 1 <= max_chars:
+                current["text"] += " " + seg["text"]
+                current["end"] = seg["end"]
+            else:
+                merged.append(current)
+                current = {"start": seg["start"], "end": seg["end"], "text": seg["text"]}
+    if current:
+        merged.append(current)
+    return merged
+
+
+def translate_segments(segments):
+    merged = merge_segments(segments)
+    print(f"Translating {len(merged)} merged segments...")
+    result = []
+    for seg in merged:
         fa = translate_text(seg["text"])
         result.append({"start": seg["start"], "end": seg["end"], "text": fa})
         time.sleep(0.5)
     return result
 
 
-# ═══════════════════════════════════════════════════
-# شکستن جملات طولانی (حل مشکل جلو زدن زیرنویس از صدا)
-# ═══════════════════════════════════════════════════
 def split_long_segment(seg):
-    """اگر متن یک سگمنت خیلی طولانی باشد، آن را به تکه‌های کوچک‌تر می‌شکند"""
+    """شکستن جملات طولانی فارسی به تکه‌های کوچک‌تر"""
     text = seg["text"].strip()
     if len(text) <= MAX_CHARS_PER_SUB:
         return [seg]
-
-    # شکستن بر اساس علائم نگارشی یا فاصله
+    
     chunks = re.split(r'(?<=[.!?،؛])\s+', text)
     
-    # اگر باز هم خیلی طولانی بود، بر اساس فاصله بشکن
     final_chunks = []
     for chunk in chunks:
         if len(chunk) <= MAX_CHARS_PER_SUB:
@@ -230,7 +244,6 @@ def split_long_segment(seg):
     if len(final_chunks) <= 1:
         return [seg]
 
-    # تقسیم زمان به نسبت طول هر تکه
     total_duration = seg["end"] - seg["start"]
     total_chars = sum(len(c) for c in final_chunks)
     current_time = seg["start"]
@@ -250,7 +263,6 @@ def split_long_segment(seg):
 
 
 def split_all_segments(segments):
-    """اعمال شکستن روی تمام سگمنت‌ها"""
     result = []
     for seg in segments:
         result.extend(split_long_segment(seg))
@@ -258,7 +270,7 @@ def split_all_segments(segments):
 
 
 # ═══════════════════════════════════════════════════
-# SRT (ساخت SRT اختصاصی برای هر قطعه - بدون تکرار)
+# SRT
 # ═══════════════════════════════════════════════════
 def format_time(seconds):
     if seconds < 0:
@@ -270,26 +282,16 @@ def format_time(seconds):
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def build_part_srt(segments, part_start, part_end, output_path):
-    """زیرنویس اختصاصی هر قطعه - هر جمله فقط در قسمتی که شروع می‌شود"""
+def build_full_srt(segments, output_path):
+    """ساخت یک SRT کامل برای کل ویدیو"""
     with open(output_path, "w", encoding="utf-8") as f:
         idx = 1
         prev_end = 0.0
         for seg in segments:
-            seg_start = seg["start"]
-            seg_end = seg["end"]
-            
-            # فقط جمله‌هایی که در این قسمت شروع می‌شن
-            if seg_start < part_start or seg_start >= part_end:
+            rel_start = max(prev_end, seg["start"])
+            rel_end = seg["end"]
+            if rel_end <= rel_start:
                 continue
-            
-            rel_start = max(prev_end, seg_start - part_start)
-            rel_end = min(part_end - part_start, seg_end - part_start)
-            
-            # جلوگیری از همپوشانی و مدت خیلی کوتاه
-            if rel_end <= rel_start or (rel_end - rel_start) < 0.3:
-                continue
-            
             f.write(f"{idx}\n")
             f.write(f"{format_time(rel_start)} --> {format_time(rel_end)}\n")
             f.write(f"{seg['text']}\n\n")
@@ -315,16 +317,20 @@ def generate_caption(video_title, part_text, part_num, total_parts):
 ۳. حداقل ۶ هشتگ مرتبط با موضوع این قسمت.
 
 خروجی را به صورت یک متن منسجم و آماده برای پست اینستاگرام (بدون هیچ توضیح اضافه‌ای) برگردان."""
-    try:
-        r = GEMINI_CLIENT.models.generate_content(model="gemini-3.8-flash", contents=prompt)
-        return r.text.strip()
-    except Exception as e:
-        print(f"Gemini error: {e}")
-        return fallback
+    
+    for attempt in range(3):
+        try:
+            r = GEMINI_CLIENT.models.generate_content(model="gemini-3.8-flash", contents=prompt)
+            return r.text.strip()
+        except Exception as e:
+            print(f"Gemini error (attempt {attempt+1}): {e}")
+            time.sleep(5)
+            
+    return fallback
 
 
 # ═══════════════════════════════════════════════════
-# تقسیم و زیرنویس (پس‌زمینه بلور + حفظ کامل تصویر)
+# پردازش کامل ویدیو و سپس برش (رویکرد جدید)
 # ═══════════════════════════════════════════════════
 def get_duration(video_path):
     r = subprocess.run(
@@ -335,51 +341,64 @@ def get_duration(video_path):
     return float(r.stdout.strip())
 
 
-def split_and_subtitle(video_path, translated_segments, duration, video_title):
+def process_full_video(video_path, full_srt_path):
+    """چسباندن زیرنویس + پس‌زمینه بلور روی کل ویدیو"""
+    print("Processing full video with subtitles and blur background...")
+    output_path = str(TMP_DIR / "full_subtitled.mp4")
+
+    filter_complex = (
+        f"[0:v]split=2[orig1][orig2];"
+        f"[orig1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:3[bg];"
+        f"[orig2]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2[vid];"
+        f"[vid]subtitles={full_srt_path}:force_style='FontName=Vazir,FontSize=14,"
+        f"PrimaryColour=&H0000FFFF,OutlineColour=&H80000000,BorderStyle=3,"
+        f"BackColour=&H80000000,Outline=1,Shadow=0,MarginV=40,Alignment=2'[vout]"
+    )
+
+    subprocess.run(
+        ["ffmpeg", "-y",
+         "-i", video_path,
+         "-filter_complex", filter_complex,
+         "-map", "[vout]", "-map", "0:a:0?",
+         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+         "-c:a", "aac", "-b:a", "128k",
+         "-movflags", "+faststart",
+         output_path],
+        check=True, capture_output=True, timeout=1800,
+    )
+    print(f"  ✅ Full video processed: {output_path}")
+    return output_path
+
+
+def split_final_video(processed_video_path, duration, video_title, translated_segments):
+    """برش ویدیوی زیرنویس شده به قطعات ۹۰ ثانیه‌ای"""
     num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) + (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
     part_duration = duration / num_parts
-    print(f"Splitting into {num_parts} parts (max {MAX_SEGMENT_DURATION}s each).")
+    print(f"Splitting processed video into {num_parts} parts...")
 
     outputs = []
     captions = []
-    
+
     for i in range(num_parts):
         part_start = i * part_duration
         part_end = min((i + 1) * part_duration, duration)
         part_len = part_end - part_start
         out_path = str(TMP_DIR / f"part_{i+1}.mp4")
-        part_srt = str(TMP_DIR / f"part_{i+1}.srt")
 
-        # 1. استخراج متن مخصوص همین قسمت
+        # استخراج متن مخصوص همین قسمت برای کپشن
         part_text = " ".join([s["text"] for s in translated_segments if s["end"] > part_start and s["start"] < part_end])
         
-        # 2. ساخت کپشن مخصوص همین قسمت
         print(f"  [Caption] Generating caption for part {i+1}/{num_parts}...")
         part_caption = generate_caption(video_title, part_text, i+1, num_parts)
         captions.append(part_caption)
 
-        # 3. ساخت SRT مخصوص این قطعه
-        build_part_srt(translated_segments, part_start, part_end, part_srt)
-
-        # 4. فیلتر FFmpeg: تصویر اصلی کامل + پس‌زمینه بلور + زیرنویس پایین و وسط
-        filter_complex = (
-            f"[0:v]split=2[orig1][orig2];"
-            f"[orig1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:3[bg];"
-            f"[orig2]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[vid];"
-            f"[vid]subtitles={part_srt}:force_style='FontName=Vazir,FontSize=14,"
-            f"PrimaryColour=&H0000FFFF,OutlineColour=&H80000000,BorderStyle=3,"
-            f"BackColour=&H80000000,Outline=1,Shadow=0,MarginV=40,Alignment=2'[vout]"
-        )
-
-        # 5. برش دقیق ویدیو (حل مشکل جلو زدن با -ss بعد از -i)
+        # برش دقیق با re-encode (چون ویدیو از قبل زیرنویس شده، فقط باید دقیق برش بخوره)
         subprocess.run(
             ["ffmpeg", "-y",
-             "-i", video_path,
              "-ss", str(part_start),
+             "-i", processed_video_path,
              "-t", str(part_len),
-             "-filter_complex", filter_complex,
-             "-map", "[vout]", "-map", "0:a:0?",
              "-c:v", "libx264", "-preset", "fast", "-crf", "23",
              "-c:a", "aac", "-b:a", "128k",
              "-movflags", "+faststart",
@@ -387,7 +406,7 @@ def split_and_subtitle(video_path, translated_segments, duration, video_title):
             check=True, capture_output=True, timeout=900,
         )
         outputs.append(out_path)
-        print(f"  ✅ Part {i+1}/{num_parts} built (blur bg).")
+        print(f"  ✅ Part {i+1}/{num_parts} built.")
 
     return outputs, captions
 
@@ -436,19 +455,27 @@ def main():
     print(f"Processing: {video['id']} - {video['title']}")
 
     try:
+        # 1. دانلود
         video_path = download_video(video["id"])
         audio_path = extract_audio(video_path)
+        
+        # 2. ترنسکریپت و ترجمه
         segments = transcribe(audio_path)
         translated = translate_segments(segments)
-        
-        # شکستن جملات طولانی
         translated = split_all_segments(translated)
-
-        duration = get_duration(video_path)
         
-        # ساخت قطعات و کپشن‌های اختصاصی
-        parts, part_captions = split_and_subtitle(video_path, translated, duration, video["title"])
+        # 3. ساخت SRT کامل
+        full_srt_path = str(TMP_DIR / "full.srt")
+        build_full_srt(translated, full_srt_path)
+        
+        # 4. پردازش کل ویدیو (زیرنویس + بلور)
+        processed_video = process_full_video(video_path, full_srt_path)
+        
+        # 5. برش ویدیوی نهایی + تولید کپشن‌ها
+        duration = get_duration(processed_video)
+        parts, part_captions = split_final_video(processed_video, duration, video["title"], translated)
 
+        # 6. آپلود
         for i, (part, part_caption) in enumerate(zip(parts, part_captions), 1):
             media_id = upload_to_instagram(part, part_caption)
             print(f"Posted part {i}/{len(parts)}: {media_id}")
