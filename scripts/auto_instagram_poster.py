@@ -32,7 +32,7 @@ PO_TOKEN_PROVIDER_URL = "http://127.0.0.1:4416"
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
 MAX_SEGMENT_DURATION = 90   # حداکثر طول هر قطعه (ثانیه)
-SKIP_INTRO_SECONDS = 15     # چند ثانیه اول ویدیو زیرنویس نشود (توضیحات/مقدمه)
+SKIP_INTRO_SECONDS = 15     # ۱۵ ثانیه اول ویدیو زیرنویس نشود (مقدمه)
 
 GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -46,18 +46,12 @@ def load_state():
         try:
             content = STATE_FILE.read_text().strip()
             if not content:
-                print("⚠️ state.json is empty, resetting...")
                 return default_state
             data = json.loads(content)
             if not isinstance(data, dict) or "queue" not in data:
-                print("⚠️ state.json is invalid, resetting...")
                 return default_state
             return data
-        except json.JSONDecodeError as e:
-            print(f"⚠️ state.json is corrupted ({e}), resetting...")
-            return default_state
-        except Exception as e:
-            print(f"⚠️ Error reading state.json ({e}), resetting...")
+        except Exception:
             return default_state
     return default_state
 
@@ -163,9 +157,15 @@ def extract_audio(video_path):
 
 
 def transcribe(audio_path):
-    print("Transcribing with Whisper...")
+    print("Transcribing with Whisper (English audio only)...")
     model = WhisperModel("small", device="cpu", compute_type="int8")
-    segments, _ = model.transcribe(audio_path, vad_filter=True)
+    # زبان را روی انگلیسی قفل کردیم و دقت را بالا بردیم
+    segments, _ = model.transcribe(
+        audio_path, 
+        language="en", 
+        vad_filter=True,
+        beam_size=5
+    )
     all_segs = [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
     # حذف زیرنویس مقدمه/توضیحات اول ویدیو
     filtered = [s for s in all_segs if s["start"] >= SKIP_INTRO_SECONDS]
@@ -216,7 +216,6 @@ def format_time(seconds):
 
 
 def build_part_srt(segments, part_start, part_end, output_path):
-    """SRT اختصاصی برای یک قطعه با زمان‌بندی نسبی (از صفر)"""
     with open(output_path, "w", encoding="utf-8") as f:
         idx = 1
         for seg in segments:
@@ -235,7 +234,7 @@ def build_part_srt(segments, part_start, part_end, output_path):
 
 
 # ═══════════════════════════════════════════════════
-# تقسیم و زیرنویس (بدون کشیدگی - با Blur Background)
+# تقسیم و زیرنویس (بدون کات شدن - با نوار مشکی بالا و پایین)
 # ═══════════════════════════════════════════════════
 def get_duration(video_path):
     r = subprocess.run(
@@ -259,26 +258,25 @@ def split_and_subtitle(video_path, translated_segments, duration):
         out_path = str(TMP_DIR / f"part_{i+1}.mp4")
         part_srt = str(TMP_DIR / f"part_{i+1}.srt")
 
-        # 1. ساخت SRT مخصوص این قطعه
+        # ساخت SRT مخصوص این قطعه
         build_part_srt(translated_segments, part_start, part_end, part_srt)
 
-        # 2. فیلتر ffmpeg: پس‌زمینه بلور + ویدیو دست‌نخورده در مرکز + زیرنویس
-        filter_complex = (
-            f"[0:v]split=2[orig1][orig2];"
-            f"[orig1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:3[bg];"
-            f"[orig2]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[vid];"
-            f"[vid]subtitles={part_srt}:force_style='FontName=Vazir,FontSize=14,"
+        # فیلتر FFmpeg: حفظ نسبت تصویر + نوار مشکی + زیرنویس کوچک و پایین
+        vf = (
+            f"scale=1080:1920:force_original_aspect_ratio=decrease,"
+            f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"subtitles={part_srt}:force_style='FontName=Vazir,FontSize=14,"
             f"PrimaryColour=&H0000FFFF,OutlineColour=&H80000000,BorderStyle=3,"
-            f"BackColour=&H80000000,Outline=1,Shadow=0,MarginV=40,Alignment=2'[vout]"
+            f"BackColour=&H80000000,Outline=1,Shadow=0,MarginV=40,Alignment=2'"
         )
 
+        # استفاده از -ss قبل از -i و -t برای دقت بالا و جلوگیری از پرش
         subprocess.run(
             ["ffmpeg", "-y",
-             "-ss", str(part_start), "-t", str(part_len),
+             "-ss", str(part_start),
              "-i", video_path,
-             "-filter_complex", filter_complex,
-             "-map", "[vout]", "-map", "0:a:0?",
+             "-t", str(part_len),
+             "-vf", vf,
              "-c:v", "libx264", "-preset", "fast", "-crf", "23",
              "-c:a", "aac", "-b:a", "128k",
              "-movflags", "+faststart",
@@ -286,7 +284,7 @@ def split_and_subtitle(video_path, translated_segments, duration):
             check=True, capture_output=True, timeout=900,
         )
         outputs.append(out_path)
-        print(f"  ✅ Part {i+1}/{num_parts} built.")
+        print(f"  ✅ Part {i+1}/{num_parts} built (without cropping).")
 
     return outputs
 
