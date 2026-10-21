@@ -36,7 +36,7 @@ GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 
 # ═══════════════════════════════════════════════════
-# ابزارهای کمکی (با مقاوم‌سازی load_state)
+# ابزارهای کمکی
 # ═══════════════════════════════════════════════════
 def load_state():
     default_state = {"queue": [], "queue_index": 0, "stats": {"success": 0, "failed": 0}}
@@ -114,90 +114,54 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو (URL via WARP + download via Apps Script)
+# دانلود مستقیم با yt-dlp (بدون Apps Script)
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
-    print(f"Downloading video {video_id} via WARP proxy (URL) + Apps Script (download)...")
+    print(f"Downloading video {video_id} via WARP proxy (direct download)...")
     video_url = f"https://www.youtube.com/watch?v={video_id}"
+    output_tpl = str(TMP_DIR / f"{video_id}.%(ext)s")
 
     cookies_path = TMP_DIR / "cookies.txt"
     if YOUTUBE_COOKIES:
         cookies_path.write_text(YOUTUBE_COOKIES)
 
     attempts = [
-        {
-            "name": "web_with_cookies",
-            "args": ["--extractor-args", "youtube:player_client=web,web_safari",
-                     "-f", "best[ext=mp4]/best"],
-            "use_cookies": True,
-        },
-        {
-            "name": "android_vr",
-            "args": ["--extractor-args", "youtube:player_client=android_vr",
-                     "-f", "best[ext=mp4]/best"],
-            "use_cookies": False,
-        },
-        {
-            "name": "tv_embedded",
-            "args": ["--extractor-args", "youtube:player_client=tv_embedded",
-                     "-f", "best[ext=mp4]/best"],
-            "use_cookies": False,
-        },
-        {
-            "name": "auto",
-            "args": ["-f", "best[ext=mp4]/best"],
-            "use_cookies": False,
-        },
+        {"name": "android_vr", "extractor_args": "youtube:player_client=android_vr"},
+        {"name": "tv_embedded", "extractor_args": "youtube:player_client=tv_embedded"},
+        {"name": "auto", "extractor_args": None},
     ]
 
-    direct_url = None
     for att in attempts:
-        try:
-            print(f"  [URL] Trying client={att['name']}...")
-            cmd = [
-                "yt-dlp", "--get-url", "--no-warnings",
-                "--proxy", WARP_PROXY,
-                "--no-check-certificates",
-                *att["args"],
-                video_url,
-            ]
-            if att["use_cookies"] and cookies_path.exists():
-                cmd.extend(["--cookies", str(cookies_path)])
+        print(f"  [Download] Trying client={att['name']}...")
+        cmd = [
+            "yt-dlp",
+            "--proxy", WARP_PROXY,
+            "--no-check-certificates",
+            "--merge-output-format", "mp4",
+            "-f", "best[ext=mp4]/best",
+            "-o", output_tpl,
+            "--no-warnings",
+            "--retries", "3",
+            "--fragment-retries", "3",
+        ]
+        if att["extractor_args"]:
+            cmd.extend(["--extractor-args", att["extractor_args"]])
+        if cookies_path.exists():
+            cmd.extend(["--cookies", str(cookies_path)])
+        cmd.append(video_url)
 
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if r.returncode == 0 and r.stdout.strip():
-                urls = [u for u in r.stdout.strip().split("\n") if u.strip()]
-                if urls:
-                    direct_url = urls[0]
-                    print(f"  ✅ Direct URL obtained (client={att['name']})")
-                    break
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            if r.returncode == 0:
+                for f in TMP_DIR.glob(f"{video_id}.*"):
+                    if f.suffix in (".mp4", ".mkv", ".webm"):
+                        print(f"  ✅ Downloaded: {f} ({f.stat().st_size} bytes) via {att['name']}")
+                        return str(f)
             print(f"    ⚠️ client={att['name']} failed: {r.stderr.strip()[-200:]}")
         except Exception as e:
             print(f"    ⚠️ client={att['name']} error: {e}")
 
-    if not direct_url:
-        raise RuntimeError("Could not get direct URL from yt-dlp with any client")
-
-    print(f"  [Download] Fetching via Apps Script...")
-    try:
-        status, headers, content = apps_script_request(
-            direct_url, method="GET",
-            headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-49999999"}
-        )
-
-        if status not in (200, 206):
-            raise RuntimeError(f"Apps Script download failed: status {status}")
-
-        if not content or len(content) < 10000:
-            raise RuntimeError(f"Downloaded content too small: {len(content)} bytes")
-
-        output_path = TMP_DIR / f"{video_id}.mp4"
-        output_path.write_bytes(content)
-        print(f"  ✅ Downloaded: {len(content)} bytes")
-        return str(output_path)
-
-    except Exception as e:
-        raise RuntimeError(f"Apps Script download failed: {e}")
+    raise RuntimeError("All direct download attempts failed")
 
 
 # ═══════════════════════════════════════════════════
