@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import shutil
 import base64
+import re
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -32,7 +33,7 @@ PO_TOKEN_PROVIDER_URL = "http://127.0.0.1:4416"
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
 MAX_SEGMENT_DURATION = 90   # حداکثر طول هر قطعه (ثانیه)
-SKIP_INTRO_SECONDS = 15     # ۱۵ ثانیه اول ویدیو زیرنویس نشود (مقدمه)
+MAX_CHARS_PER_SUB = 35      # حداکثر کاراکتر در هر زیرنویس (جلوگیری از طولانی شدن)
 
 GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -95,7 +96,7 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو (با Deno + PO Token Provider)
+# دانلود ویدیو
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
     print(f"Downloading video {video_id} via WARP proxy + Deno + PO Token...")
@@ -132,7 +133,7 @@ def download_video(video_id):
             if r.returncode == 0:
                 for f in TMP_DIR.glob(f"{video_id}.*"):
                     if f.suffix in (".mp4", ".mkv", ".webm"):
-                        print(f"  ✅ Downloaded: {f} ({f.stat().st_size} bytes) with format: {fmt}")
+                        print(f"  ✅ Downloaded: {f} ({f.stat().st_size} bytes)")
                         return str(f)
             print(f"    ⚠️ format={fmt} failed: {r.stderr.strip()[-200:]}")
             last_error = r.stderr.strip()
@@ -157,20 +158,16 @@ def extract_audio(video_path):
 
 
 def transcribe(audio_path):
-    print("Transcribing with Whisper (English audio only)...")
+    print("Transcribing with Whisper (English only)...")
     model = WhisperModel("small", device="cpu", compute_type="int8")
-    # قفل کردن زبان روی انگلیسی برای دقت بیشتر
     segments, _ = model.transcribe(
         audio_path, 
         language="en", 
         vad_filter=True,
         beam_size=5
     )
-    all_segs = [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
-    # حذف مقدمه/توضیحات اول ویدیو
-    filtered = [s for s in all_segs if s["start"] >= SKIP_INTRO_SECONDS]
-    print(f"Total segments: {len(all_segs)} → after skipping intro: {len(filtered)}")
-    return filtered
+    # دیگر مقدمه حذف نمی‌شود (زیرنویس از ثانیه صفر شروع می‌شود)
+    return [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
 
 
 # ═══════════════════════════════════════════════════
@@ -203,7 +200,65 @@ def translate_segments(segments):
 
 
 # ═══════════════════════════════════════════════════
-# SRT (ساخت SRT اختصاصی برای هر قطعه)
+# شکستن جملات طولانی (حل مشکل جلو زدن زیرنویس از صدا)
+# ═══════════════════════════════════════════════════
+def split_long_segment(seg):
+    """اگر متن یک سگمنت خیلی طولانی باشد، آن را به تکه‌های کوچک‌تر می‌شکند"""
+    text = seg["text"].strip()
+    if len(text) <= MAX_CHARS_PER_SUB:
+        return [seg]
+
+    # شکستن بر اساس علائم نگارشی یا فاصله
+    chunks = re.split(r'(?<=[.!?،؛])\s+', text)
+    
+    # اگر باز هم خیلی طولانی بود، بر اساس فاصله بشکن
+    final_chunks = []
+    for chunk in chunks:
+        if len(chunk) <= MAX_CHARS_PER_SUB:
+            final_chunks.append(chunk)
+        else:
+            words = chunk.split()
+            current = ""
+            for word in words:
+                if len(current) + len(word) + 1 <= MAX_CHARS_PER_SUB:
+                    current += (word + " ")
+                else:
+                    if current: final_chunks.append(current.strip())
+                    current = word + " "
+            if current: final_chunks.append(current.strip())
+
+    if len(final_chunks) <= 1:
+        return [seg]
+
+    # تقسیم زمان به نسبت طول هر تکه
+    total_duration = seg["end"] - seg["start"]
+    total_chars = sum(len(c) for c in final_chunks)
+    current_time = seg["start"]
+    new_segs = []
+    
+    for chunk in final_chunks:
+        if total_chars == 0: break
+        chunk_duration = (len(chunk) / total_chars) * total_duration
+        new_segs.append({
+            "start": current_time,
+            "end": current_time + chunk_duration,
+            "text": chunk
+        })
+        current_time += chunk_duration
+        
+    return new_segs
+
+
+def split_all_segments(segments):
+    """اعمال شکستن روی تمام سگمنت‌ها"""
+    result = []
+    for seg in segments:
+        result.extend(split_long_segment(seg))
+    return result
+
+
+# ═══════════════════════════════════════════════════
+# SRT (ساخت SRT اختصاصی برای هر قطعه - بدون تکرار)
 # ═══════════════════════════════════════════════════
 def format_time(seconds):
     if seconds < 0:
@@ -216,21 +271,30 @@ def format_time(seconds):
 
 
 def build_part_srt(segments, part_start, part_end, output_path):
+    """زیرنویس اختصاصی هر قطعه - هر جمله فقط در قسمتی که شروع می‌شود"""
     with open(output_path, "w", encoding="utf-8") as f:
         idx = 1
+        prev_end = 0.0
         for seg in segments:
             seg_start = seg["start"]
             seg_end = seg["end"]
-            if seg_end <= part_start or seg_start >= part_end:
+            
+            # فقط جمله‌هایی که در این قسمت شروع می‌شن
+            if seg_start < part_start or seg_start >= part_end:
                 continue
-            rel_start = max(0.0, seg_start - part_start)
+            
+            rel_start = max(prev_end, seg_start - part_start)
             rel_end = min(part_end - part_start, seg_end - part_start)
-            if rel_end <= rel_start:
+            
+            # جلوگیری از همپوشانی و مدت خیلی کوتاه
+            if rel_end <= rel_start or (rel_end - rel_start) < 0.3:
                 continue
+            
             f.write(f"{idx}\n")
             f.write(f"{format_time(rel_start)} --> {format_time(rel_end)}\n")
             f.write(f"{seg['text']}\n\n")
             idx += 1
+            prev_end = rel_end
 
 
 # ═══════════════════════════════════════════════════
@@ -260,7 +324,7 @@ def generate_caption(video_title, part_text, part_num, total_parts):
 
 
 # ═══════════════════════════════════════════════════
-# تقسیم و زیرنویس (بدون کات شدن - با نوار مشکی بالا و پایین)
+# تقسیم و زیرنویس (پس‌زمینه بلور + حفظ کامل تصویر)
 # ═══════════════════════════════════════════════════
 def get_duration(video_path):
     r = subprocess.run(
@@ -297,22 +361,25 @@ def split_and_subtitle(video_path, translated_segments, duration, video_title):
         # 3. ساخت SRT مخصوص این قطعه
         build_part_srt(translated_segments, part_start, part_end, part_srt)
 
-        # 4. فیلتر FFmpeg: حفظ نسبت تصویر + نوار مشکی + زیرنویس کوچک و پایین
-        vf = (
-            f"scale=1080:1920:force_original_aspect_ratio=decrease,"
-            f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,"
-            f"subtitles={part_srt}:force_style='FontName=Vazir,FontSize=14,"
+        # 4. فیلتر FFmpeg: تصویر اصلی کامل + پس‌زمینه بلور + زیرنویس پایین و وسط
+        filter_complex = (
+            f"[0:v]split=2[orig1][orig2];"
+            f"[orig1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:3[bg];"
+            f"[orig2]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[vid];"
+            f"[vid]subtitles={part_srt}:force_style='FontName=Vazir,FontSize=14,"
             f"PrimaryColour=&H0000FFFF,OutlineColour=&H80000000,BorderStyle=3,"
-            f"BackColour=&H80000000,Outline=1,Shadow=0,MarginV=40,Alignment=2'"
+            f"BackColour=&H80000000,Outline=1,Shadow=0,MarginV=40,Alignment=2'[vout]"
         )
 
-        # 5. برش دقیق ویدیو
+        # 5. برش دقیق ویدیو (حل مشکل جلو زدن با -ss بعد از -i)
         subprocess.run(
             ["ffmpeg", "-y",
-             "-ss", str(part_start),
              "-i", video_path,
+             "-ss", str(part_start),
              "-t", str(part_len),
-             "-vf", vf,
+             "-filter_complex", filter_complex,
+             "-map", "[vout]", "-map", "0:a:0?",
              "-c:v", "libx264", "-preset", "fast", "-crf", "23",
              "-c:a", "aac", "-b:a", "128k",
              "-movflags", "+faststart",
@@ -320,7 +387,7 @@ def split_and_subtitle(video_path, translated_segments, duration, video_title):
             check=True, capture_output=True, timeout=900,
         )
         outputs.append(out_path)
-        print(f"  ✅ Part {i+1}/{num_parts} built.")
+        print(f"  ✅ Part {i+1}/{num_parts} built (blur bg).")
 
     return outputs, captions
 
@@ -373,10 +440,13 @@ def main():
         audio_path = extract_audio(video_path)
         segments = transcribe(audio_path)
         translated = translate_segments(segments)
+        
+        # شکستن جملات طولانی
+        translated = split_all_segments(translated)
 
         duration = get_duration(video_path)
         
-        # ساخت قطعات و کپشن‌های اختصاصی هر کدام
+        # ساخت قطعات و کپشن‌های اختصاصی
         parts, part_captions = split_and_subtitle(video_path, translated, duration, video["title"])
 
         for i, (part, part_caption) in enumerate(zip(parts, part_captions), 1):
