@@ -115,10 +115,10 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو (با PO Token Provider و زنجیره Fallback)
+# دانلود ویدیو (با Deno + PO Token Provider)
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
-    print(f"Downloading video {video_id} via WARP proxy + PO Token Provider...")
+    print(f"Downloading video {video_id} via WARP proxy + Deno + PO Token...")
     video_url = f"https://www.youtube.com/watch?v={video_id}"
     output_tpl = str(TMP_DIR / f"{video_id}.%(ext)s")
 
@@ -126,65 +126,51 @@ def download_video(video_id):
     if YOUTUBE_COOKIES:
         cookies_path.write_text(YOUTUBE_COOKIES)
 
-    # زنجیره تلاش: ابتدا کلاینت‌هایی که با PO Token کار می‌کنند، سپس fallback
-    attempts = [
-        {
-            "name": "android_vr (with PO Token)",
-            "args": ["--extractor-args", f"youtube:player_client=android_vr;po_token_provider={PO_TOKEN_PROVIDER_URL}"],
-            "format": "best[ext=mp4]/best",
-        },
-        {
-            "name": "web_embedded (with PO Token)",
-            "args": ["--extractor-args", f"youtube:player_client=web_embedded;po_token_provider={PO_TOKEN_PROVIDER_URL}"],
-            "format": "best[ext=mp4]/best",
-        },
-        {
-            "name": "ios (with PO Token)",
-            "args": ["--extractor-args", f"youtube:player_client=ios;po_token_provider={PO_TOKEN_PROVIDER_URL}"],
-            "format": "best[ext=mp4]/best",
-        },
-        {
-            "name": "tv (with PO Token)",
-            "args": ["--extractor-args", f"youtube:player_client=tv;po_token_provider={PO_TOKEN_PROVIDER_URL}"],
-            "format": "best[ext=mp4]/best",
-        },
-        {
-            "name": "android (no PO Token, format 18 fallback)",
-            "args": ["--extractor-args", "youtube:player_client=android"],
-            "format": "18/best[ext=mp4]/best",
-        },
+    # تنظیمات اصلی: استفاده از Deno به عنوان موتور JS و فعال‌سازی PO Token Provider
+    base_args = [
+        "--proxy", WARP_PROXY,
+        "--no-check-certificates",
+        "--merge-output-format", "mp4",
+        "-o", output_tpl,
+        "--no-warnings",
+        "--retries", "3",
+        "--fragment-retries", "3",
+        # *** کلید حل مشکل: استفاده از Deno برای حل n-challenge ***
+        "--js-runtimes", "deno",
+        # فعال‌سازی PO Token Provider
+        "--extractor-args", f"youtube:player_client=android_vr,web_embedded;youtubepot-bgutilhttp:base_url={PO_TOKEN_PROVIDER_URL}",
     ]
 
-    for att in attempts:
-        print(f"  [Download] Trying client={att['name']}...")
-        cmd = [
-            "yt-dlp",
-            "--proxy", WARP_PROXY,
-            "--no-check-certificates",
-            "--merge-output-format", "mp4",
-            "-f", att["format"],
-            "-o", output_tpl,
-            "--no-warnings",
-            "--retries", "3",
-            "--fragment-retries", "3",
-            *att["args"],
-            video_url,
-        ]
-        if cookies_path.exists():
-            cmd.extend(["--cookies", str(cookies_path)])
+    if cookies_path.exists():
+        base_args.extend(["--cookies", str(cookies_path)])
+
+    # زنجیره فرمت‌های جایگزین
+    formats_to_try = [
+        "best[ext=mp4]/best",
+        "18/22/17/36",
+        "bv*+ba/b",
+        "worst",
+    ]
+
+    last_error = None
+    for fmt in formats_to_try:
+        print(f"  [Download] Trying format: {fmt}...")
+        cmd = ["yt-dlp", "-f", fmt] + base_args + [video_url]
 
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
             if r.returncode == 0:
                 for f in TMP_DIR.glob(f"{video_id}.*"):
                     if f.suffix in (".mp4", ".mkv", ".webm"):
-                        print(f"  ✅ Downloaded: {f} ({f.stat().st_size} bytes) via {att['name']}")
+                        print(f"  ✅ Downloaded: {f} ({f.stat().st_size} bytes) with format: {fmt}")
                         return str(f)
-            print(f"    ⚠️ client={att['name']} failed: {r.stderr.strip()[-200:]}")
+            print(f"    ⚠️ format={fmt} failed: {r.stderr.strip()[-200:]}")
+            last_error = r.stderr.strip()
         except Exception as e:
-            print(f"    ⚠️ client={att['name']} error: {e}")
+            print(f"    ⚠️ format={fmt} error: {e}")
+            last_error = str(e)
 
-    raise RuntimeError("All download attempts failed")
+    raise RuntimeError(f"All download attempts failed. Last error: {last_error}")
 
 
 # ═══════════════════════════════════════════════════
