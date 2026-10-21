@@ -23,15 +23,14 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL", "").strip()
 YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "").strip()
 
-# ← آدرس Apps Script خودت
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxVbY5-Kz4tLjx8KjiVBpULGA2xHLovBzSNfd7KO3VN8N7iDplaocu_Uv-vpRB_qSDH9g/exec"
 APPS_SCRIPT_AUTH_KEY = "reza81697"
 
-WARP_PROXY = "socks5://127.0.0.1:40000"  # ← پروکسی WARP
+WARP_PROXY = "socks5://127.0.0.1:40000"
 
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
-MAX_SEGMENT_DURATION = 180  # ثانیه (۳ دقیقه)
+MAX_SEGMENT_DURATION = 180
 
 GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -44,8 +43,10 @@ def load_state():
         return json.loads(STATE_FILE.read_text())
     return {"queue": [], "queue_index": 0, "stats": {"success": 0, "failed": 0}}
 
+
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+
 
 def telegram(msg):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -60,9 +61,6 @@ def telegram(msg):
         print(f"Telegram error: {e}")
 
 
-# ═══════════════════════════════════════════════════
-# Apps Script Proxy
-# ═══════════════════════════════════════════════════
 def apps_script_request(url, method="GET", headers=None):
     payload = {
         "k": APPS_SCRIPT_AUTH_KEY,
@@ -78,17 +76,11 @@ def apps_script_request(url, method="GET", headers=None):
     return data.get("s"), data.get("h"), base64.b64decode(data.get("b", ""))
 
 
-# ═══════════════════════════════════════════════════
-# گرفتن لیست ویدیوها
-# ═══════════════════════════════════════════════════
 def fetch_channel_videos(channel_url):
     print(f"Fetching channel videos from: {channel_url}")
     result = subprocess.run(
-        [
-            "yt-dlp", "--flat-playlist", "--playlist-reverse",
-            "--print", "%(id)s|%(title)s|%(duration)s",
-            channel_url,
-        ],
+        ["yt-dlp", "--flat-playlist", "--playlist-reverse",
+         "--print", "%(id)s|%(title)s|%(duration)s", channel_url],
         capture_output=True, text=True, timeout=600,
     )
     videos = []
@@ -106,13 +98,13 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو با WARP + Apps Script
+# دانلود ویدیو (WARP + تغییر کلاینت یوتیوب)
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
     print(f"Downloading video {video_id} via WARP proxy...")
     video_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    max_retries = 5
+    max_retries = 3
     last_error = None
 
     for attempt in range(1, max_retries + 1):
@@ -126,28 +118,26 @@ def download_video(video_id):
             cmd = [
                 "yt-dlp", "--get-url", "--no-warnings",
                 "--proxy", WARP_PROXY,
+                "--extractor-args", "youtube:player_client=android,ios,web_safari",
+                "--user-agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
                 "-f", "best[height<=720]",
                 video_url,
             ]
             if cookies_path.exists():
                 cmd.extend(["--cookies", str(cookies_path)])
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
 
             if result.returncode != 0 or not result.stdout.strip():
                 error_msg = result.stderr.strip()
-                if "The page needs to be reloaded" in error_msg:
-                    print(f"  ⚠️ YouTube requested reload. Waiting 5s...")
-                    time.sleep(5)
-                    last_error = error_msg
-                    continue
-                else:
-                    raise RuntimeError(f"yt-dlp failed: {error_msg[-500:]}")
+                print(f"  ⚠️ Attempt {attempt} failed: {error_msg[-300:]}")
+                last_error = error_msg
+                time.sleep(10)
+                continue
 
             direct_url = result.stdout.strip().split("\n")[0]
             print("  ✅ Direct URL obtained.")
 
-            # دانلود از طریق Apps Script (IP گوگل)
             status, headers, content = apps_script_request(
                 direct_url, method="GET",
                 headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-49999999"}
@@ -161,15 +151,13 @@ def download_video(video_id):
             print(f"  ✅ Downloaded: {len(content)} bytes")
             return str(output_path)
 
-        except RuntimeError:
-            raise
         except Exception as e:
             last_error = str(e)
-            print(f"  ⚠️ Attempt {attempt} failed: {e}")
+            print(f"  ⚠️ Attempt {attempt} error: {e}")
             if attempt < max_retries:
-                time.sleep(5)
+                time.sleep(10)
 
-    raise RuntimeError(f"All attempts failed: {last_error}")
+    raise RuntimeError(f"All {max_retries} attempts failed: {last_error}")
 
 
 # ═══════════════════════════════════════════════════
@@ -183,6 +171,7 @@ def extract_audio(video_path):
         check=True, capture_output=True,
     )
     return audio_path
+
 
 def transcribe(audio_path):
     print("Transcribing with Whisper...")
@@ -209,6 +198,7 @@ def translate_text(text):
         time.sleep(3)
     return text
 
+
 def translate_segments(segments):
     print(f"Translating {len(segments)} segments...")
     result = []
@@ -229,6 +219,7 @@ def format_time(seconds):
     h = int(seconds) // 3600
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
+
 def build_srt(segments, output_path):
     with open(output_path, "w", encoding="utf-8") as f:
         for i, seg in enumerate(segments, 1):
@@ -247,6 +238,7 @@ def get_duration(video_path):
         capture_output=True, text=True,
     )
     return float(r.stdout.strip())
+
 
 def split_and_subtitle(video_path, srt_path, duration):
     num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) + (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
@@ -267,15 +259,10 @@ def split_and_subtitle(video_path, srt_path, duration):
         )
 
         subprocess.run(
-            [
-                "ffmpeg", "-y",
-                "-ss", str(start), "-to", str(end),
-                "-i", video_path,
-                "-vf", vf,
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                "-c:a", "aac", "-b:a", "128k",
-                out_path,
-            ],
+            ["ffmpeg", "-y", "-ss", str(start), "-to", str(end),
+             "-i", video_path, "-vf", vf,
+             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+             "-c:a", "aac", "-b:a", "128k", out_path],
             check=True, capture_output=True, timeout=900,
         )
         outputs.append(out_path)
