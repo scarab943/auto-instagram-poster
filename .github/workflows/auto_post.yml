@@ -19,6 +19,11 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Install FFmpeg & Fonts
         run: |
           sudo apt-get update -qq
@@ -31,6 +36,15 @@ jobs:
 
       - name: Install Python deps
         run: pip install -r requirements.txt
+
+      - name: Setup BGutil PO Token Provider
+        run: |
+          git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /tmp/bgutil
+          cd /tmp/bgutil/server
+          npm install --production
+          nohup node build/main.js --port 4416 &> /tmp/bgutil.log &
+          sleep 3
+          echo "✅ BGutil PO Token Provider is running on port 4416"
 
       - name: Setup WARP VPN
         run: |
