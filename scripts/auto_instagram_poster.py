@@ -98,61 +98,73 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو (سه استراتژی مختلف)
+# دانلود ویدیو (URL via WARP + download via Apps Script)
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
-    print(f"Downloading video {video_id} via WARP proxy...")
+    print(f"Downloading video {video_id} via WARP proxy (URL) + Apps Script (download)...")
     video_url = f"https://www.youtube.com/watch?v={video_id}"
-    output_tpl = str(TMP_DIR / f"{video_id}.%(ext)s")
 
     cookies_path = TMP_DIR / "cookies.txt"
     if YOUTUBE_COOKIES:
         cookies_path.write_text(YOUTUBE_COOKIES)
 
-    attempts = [
-        {
-            "name": "android",
-            "args": ["--extractor-args", "youtube:player_client=android,web_safari",
-                     "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b"],
-        },
-        {
-            "name": "ios",
-            "args": ["--extractor-args", "youtube:player_client=ios,web_safari",
-                     "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b"],
-        },
-        {
-            "name": "auto",
-            "args": ["-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b"],
-        },
+    # مرحله 1: گرفتن لینک مستقیم با yt-dlp (فقط لینک، نه دانلود)
+    FORMAT_CHAIN = [
+        "best[ext=mp4]/best",
+        "18/22/17/36",  # legacy combined formats
+        "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/worst",
+        "worst",
     ]
 
-    for att in attempts:
-        print(f"  Trying with client={att['name']}...")
-        cmd = [
-            "yt-dlp",
-            "--proxy", WARP_PROXY,
-            "--no-check-certificates",
-            "--merge-output-format", "mp4",
-            "-o", output_tpl,
-            "--no-warnings",
-            "--retries", "3",
-            "--fragment-retries", "3",
-            *att["args"],
-            video_url,
-        ]
-        if cookies_path.exists():
-            cmd.extend(["--cookies", str(cookies_path)])
+    direct_url = None
+    for fmt in FORMAT_CHAIN:
+        try:
+            print(f"  [URL] Trying format: {fmt}")
+            cmd = [
+                "yt-dlp", "--get-url", "--no-warnings",
+                "--proxy", WARP_PROXY,
+                "--extractor-args", "youtube:player_client=android,ios,web_safari",
+                "-f", fmt,
+                video_url,
+            ]
+            if cookies_path.exists():
+                cmd.extend(["--cookies", str(cookies_path)])
 
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-        if r.returncode == 0:
-            for f in TMP_DIR.glob(f"{video_id}.*"):
-                if f.suffix in (".mp4", ".mkv", ".webm"):
-                    print(f"  ✅ Downloaded: {f} ({f.stat().st_size} bytes) via {att['name']}")
-                    return str(f)
-        print(f"    ⚠️ {att['name']} failed: {r.stderr[-200:]}")
-        time.sleep(5)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if r.returncode == 0 and r.stdout.strip():
+                urls = [u for u in r.stdout.strip().split("\n") if u.strip()]
+                if urls:
+                    direct_url = urls[0]
+                    print(f"  ✅ Direct URL obtained (format={fmt})")
+                    break
+            print(f"    ⚠️ format {fmt} failed: {r.stderr.strip()[-200:]}")
+        except Exception as e:
+            print(f"    ⚠️ format {fmt} error: {e}")
 
-    raise RuntimeError("All download attempts failed")
+    if not direct_url:
+        raise RuntimeError("Could not get direct URL from yt-dlp")
+
+    # مرحله 2: دانلود از طریق Apps Script
+    print(f"  [Download] Fetching via Apps Script...")
+    try:
+        status, headers, content = apps_script_request(
+            direct_url, method="GET",
+            headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-49999999"}
+        )
+
+        if status not in (200, 206):
+            raise RuntimeError(f"Apps Script download failed: status {status}")
+
+        if not content or len(content) < 10000:
+            raise RuntimeError(f"Downloaded content too small: {len(content)} bytes")
+
+        output_path = TMP_DIR / f"{video_id}.mp4"
+        output_path.write_bytes(content)
+        print(f"  ✅ Downloaded: {len(content)} bytes")
+        return str(output_path)
+
+    except Exception as e:
+        raise RuntimeError(f"Apps Script download failed: {e}")
 
 
 # ═══════════════════════════════════════════════════
