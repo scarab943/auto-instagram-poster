@@ -293,7 +293,8 @@ def generate_caption(video_title, translated_text):
 متن: {translated_text[:800]}
 یه کپشن جذاب و کوتاه فارسی با ۵-۸ ایموجی و ۵-۸ هشتگ مرتبط با موضوع بنویس. فقط متن کپشن و هشتگ‌ها را برگردان."""
     try:
-        r = GEMINI_CLIENT.models.generate_content(model="gemini-1.5-flash", contents=prompt)
+        # مدل به‌روزرسانی شد
+        r = GEMINI_CLIENT.models.generate_content(model="gemini-2.5-flash", contents=prompt)
         return r.text.strip()
     except Exception as e:
         print(f"Gemini error: {e}")
