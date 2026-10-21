@@ -98,7 +98,7 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو (WARP + فرمت انعطاف‌پذیر)
+# دانلود ویدیو (WARP + فرمت کاملاً آزاد)
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
     print(f"Downloading video {video_id} via WARP proxy...")
@@ -115,13 +115,13 @@ def download_video(video_id):
             if YOUTUBE_COOKIES:
                 cookies_path.write_text(YOUTUBE_COOKIES)
 
-            # فرمت انعطاف‌پذیر با چندین گزینه
+            # فرمت کاملاً آزاد: بهترین فرمتی که موجوده
             cmd = [
                 "yt-dlp", "--get-url", "--no-warnings",
                 "--proxy", WARP_PROXY,
                 "--extractor-args", "youtube:player_client=android,ios,web_safari",
                 "--user-agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
-                "-f", "b[height<=720]/bv*[height<=720]+ba/best",
+                "-f", "best/bv*+ba/worst",
                 video_url,
             ]
             if cookies_path.exists():
@@ -136,13 +136,12 @@ def download_video(video_id):
                 time.sleep(10)
                 continue
 
-            # چند خط URL برمی‌گرده (ویدیو + صدا). اولی رو بگیر
             urls = result.stdout.strip().split("\n")
             if not urls or not urls[0]:
                 raise RuntimeError("No URL returned from yt-dlp")
             
             direct_url = urls[0]
-            print(f"  ✅ Direct URL obtained: {direct_url[:60]}...")
+            print(f"  ✅ Direct URL obtained")
 
             status, headers, content = apps_script_request(
                 direct_url, method="GET",
