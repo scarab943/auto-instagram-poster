@@ -78,21 +78,6 @@ def telegram(msg):
         print(f"Telegram error: {e}")
 
 
-def apps_script_request(url, method="GET", headers=None):
-    payload = {
-        "k": APPS_SCRIPT_AUTH_KEY,
-        "m": method,
-        "u": url,
-        "h": headers or {"User-Agent": "Mozilla/5.0"},
-    }
-    r = requests.post(APPS_SCRIPT_URL, json=payload, timeout=300)
-    r.raise_for_status()
-    data = r.json()
-    if "e" in data:
-        raise RuntimeError(f"Apps Script error: {data['e']}")
-    return data.get("s"), data.get("h"), base64.b64decode(data.get("b", ""))
-
-
 def fetch_channel_videos(channel_url):
     print(f"Fetching channel videos from: {channel_url}")
     result = subprocess.run(
@@ -293,8 +278,8 @@ def generate_caption(video_title, translated_text):
 متن: {translated_text[:800]}
 یه کپشن جذاب و کوتاه فارسی با ۵-۸ ایموجی و ۵-۸ هشتگ مرتبط با موضوع بنویس. فقط متن کپشن و هشتگ‌ها را برگردان."""
     try:
-        # مدل به‌روزرسانی شد
-        r = GEMINI_CLIENT.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        # مدل به gemini-3.8-flash تغییر کرد
+        r = GEMINI_CLIENT.models.generate_content(model="gemini-3.8-flash", contents=prompt)
         return r.text.strip()
     except Exception as e:
         print(f"Gemini error: {e}")
