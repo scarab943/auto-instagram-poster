@@ -27,6 +27,8 @@ YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "").strip()
 APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxVbY5-Kz4tLjx8KjiVBpULGA2xHLovBzSNfd7KO3VN8N7iDplaocu_Uv-vpRB_qSDH9g/exec"
 APPS_SCRIPT_AUTH_KEY = "reza81697"
 
+WARP_PROXY = "socks5://127.0.0.1:40000"  # ← پروکسی WARP
+
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
 MAX_SEGMENT_DURATION = 180  # ثانیه (۳ دقیقه)
@@ -104,13 +106,12 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو با کوکی و Apps Script
+# دانلود ویدیو با WARP + Apps Script
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
-    print(f"Downloading video {video_id} via Apps Script...")
+    print(f"Downloading video {video_id} via WARP proxy...")
     video_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    # ═══ تلاش مجدد برای غلبه بر خطای "The page needs to be reloaded" ═══
     max_retries = 5
     last_error = None
 
@@ -118,14 +119,13 @@ def download_video(video_id):
         try:
             print(f"  [Attempt {attempt}/{max_retries}] Getting direct URL...")
 
-            # ۱. آماده‌سازی فایل کوکی
             cookies_path = TMP_DIR / "cookies.txt"
             if YOUTUBE_COOKIES:
                 cookies_path.write_text(YOUTUBE_COOKIES)
 
-            # ۲. گرفتن لینک مستقیم با yt-dlp (با کوکی)
             cmd = [
                 "yt-dlp", "--get-url", "--no-warnings",
+                "--proxy", WARP_PROXY,
                 "-f", "best[height<=720]",
                 video_url,
             ]
@@ -136,20 +136,18 @@ def download_video(video_id):
 
             if result.returncode != 0 or not result.stdout.strip():
                 error_msg = result.stderr.strip()
-                # اگه خطای "reload" بود، دوباره تلاش کن
                 if "The page needs to be reloaded" in error_msg:
-                    print(f"  ⚠️ YouTube requested reload. Waiting 5s and retrying...")
+                    print(f"  ⚠️ YouTube requested reload. Waiting 5s...")
                     time.sleep(5)
                     last_error = error_msg
                     continue
                 else:
-                    # خطای دیگه‌ای هست، تلاش نکن
                     raise RuntimeError(f"yt-dlp failed: {error_msg[-500:]}")
 
             direct_url = result.stdout.strip().split("\n")[0]
             print("  ✅ Direct URL obtained.")
 
-            # ۳. دانلود فایل از طریق Apps Script
+            # دانلود از طریق Apps Script (IP گوگل)
             status, headers, content = apps_script_request(
                 direct_url, method="GET",
                 headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-49999999"}
@@ -160,7 +158,7 @@ def download_video(video_id):
 
             output_path = TMP_DIR / f"{video_id}.mp4"
             output_path.write_bytes(content)
-            print(f"  ✅ Downloaded: {output_path} ({len(content)} bytes)")
+            print(f"  ✅ Downloaded: {len(content)} bytes")
             return str(output_path)
 
         except RuntimeError:
@@ -171,7 +169,8 @@ def download_video(video_id):
             if attempt < max_retries:
                 time.sleep(5)
 
-    raise RuntimeError(f"All {max_retries} attempts failed. Last error: {last_error}")
+    raise RuntimeError(f"All attempts failed: {last_error}")
+
 
 # ═══════════════════════════════════════════════════
 # استخراج صدا + Whisper
