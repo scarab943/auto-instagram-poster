@@ -33,6 +33,7 @@ PO_TOKEN_PROVIDER_URL = "http://127.0.0.1:4416"
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
 MAX_SEGMENT_DURATION = 90   # حداکثر طول هر قطعه (ثانیه)
+OVERLAP_SECONDS = 3         # همپوشانی بین قسمت‌ها (برای قسمت‌های ۲ به بعد)
 MAX_CHARS_PER_SUB = 40      # حداکثر کاراکتر در هر زیرنویس
 
 GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -330,7 +331,7 @@ def generate_caption(video_title, part_text, part_num, total_parts):
 
 
 # ═══════════════════════════════════════════════════
-# پردازش کامل ویدیو و سپس برش (رویکرد جدید)
+# پردازش کامل ویدیو و سپس برش (با همپوشانی ۳ ثانیه)
 # ═══════════════════════════════════════════════════
 def get_duration(video_path):
     r = subprocess.run(
@@ -372,28 +373,37 @@ def process_full_video(video_path, full_srt_path):
 
 
 def split_final_video(processed_video_path, duration, video_title, translated_segments):
-    """برش ویدیوی زیرنویس شده به قطعات ۹۰ ثانیه‌ای"""
+    """برش ویدیوی زیرنویس شده به قطعات ۹۰ ثانیه‌ای با همپوشانی ۳ ثانیه"""
     num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) + (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
     part_duration = duration / num_parts
-    print(f"Splitting processed video into {num_parts} parts...")
+    print(f"Splitting processed video into {num_parts} parts (overlap {OVERLAP_SECONDS}s for parts 2+).")
 
     outputs = []
     captions = []
 
     for i in range(num_parts):
-        part_start = i * part_duration
+        # محاسبه زمان شروع و پایان با همپوشانی
+        if i == 0:
+            # قسمت اول: از صفر
+            part_start = 0
+        else:
+            # قسمت‌های ۲ به بعد: ۳ ثانیه عقب‌تر
+            part_start = max(0, (i * part_duration) - OVERLAP_SECONDS)
+        
         part_end = min((i + 1) * part_duration, duration)
         part_len = part_end - part_start
         out_path = str(TMP_DIR / f"part_{i+1}.mp4")
 
-        # استخراج متن مخصوص همین قسمت برای کپشن
-        part_text = " ".join([s["text"] for s in translated_segments if s["end"] > part_start and s["start"] < part_end])
+        # استخراج متن مخصوص همین قسمت (بر اساس زمان‌های اصلی، نه با همپوشانی)
+        original_part_start = i * part_duration
+        original_part_end = part_end
+        part_text = " ".join([s["text"] for s in translated_segments if s["end"] > original_part_start and s["start"] < original_part_end])
         
-        print(f"  [Caption] Generating caption for part {i+1}/{num_parts}...")
+        print(f"  [Caption] Generating caption for part {i+1}/{num_parts} (start={part_start:.1f}s, len={part_len:.1f}s)...")
         part_caption = generate_caption(video_title, part_text, i+1, num_parts)
         captions.append(part_caption)
 
-        # برش دقیق با re-encode (چون ویدیو از قبل زیرنویس شده، فقط باید دقیق برش بخوره)
+        # برش ویدیوی زیرنویس شده
         subprocess.run(
             ["ffmpeg", "-y",
              "-ss", str(part_start),
@@ -471,7 +481,7 @@ def main():
         # 4. پردازش کل ویدیو (زیرنویس + بلور)
         processed_video = process_full_video(video_path, full_srt_path)
         
-        # 5. برش ویدیوی نهایی + تولید کپشن‌ها
+        # 5. برش ویدیوی نهایی + تولید کپشن‌ها (با همپوشانی)
         duration = get_duration(processed_video)
         parts, part_captions = split_final_video(processed_video, duration, video["title"], translated)
 
