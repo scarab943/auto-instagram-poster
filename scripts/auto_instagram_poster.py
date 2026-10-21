@@ -98,7 +98,7 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو (اصلاح شده با زنجیره فرمت و yt-dlp مستقیم)
+# دانلود ویدیو (اصلاح شده: دو کلاینت + فرمت مطمئن)
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
     print(f"Downloading video {video_id} via WARP proxy...")
@@ -109,31 +109,36 @@ def download_video(video_id):
     if YOUTUBE_COOKIES:
         cookies_path.write_text(YOUTUBE_COOKIES)
 
-    cmd = [
-        "yt-dlp",
-        "--proxy", WARP_PROXY,
-        "--extractor-args", "youtube:player_client=android,ios,web_safari",
-        "--user-agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
-        "-f", "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/worst",
-        "--merge-output-format", "mp4",
-        "-o", output_tpl,
-        "--no-warnings",
-        video_url,
-    ]
-    if cookies_path.exists():
-        cmd.extend(["--cookies", str(cookies_path)])
+    # اول با کلاینت default (بهترین کیفیت) و بعد با android
+    clients_to_try = ["default", "android"]
 
-    for attempt in range(1, 4):
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-        if r.returncode == 0:
-            for f in TMP_DIR.glob(f"{video_id}.*"):
-                if f.suffix in (".mp4", ".mkv", ".webm"):
-                    print(f"  ✅ Downloaded: {f} ({f.stat().st_size} bytes)")
-                    return str(f)
-        print(f"  ⚠️ attempt {attempt} failed: {r.stderr[-300:]}")
-        time.sleep(10)
+    for client in clients_to_try:
+        print(f"  Trying with player_client={client}...")
 
-    raise RuntimeError("All download attempts failed")
+        cmd = [
+            "yt-dlp",
+            "--proxy", WARP_PROXY,
+            "--extractor-args", f"youtube:player_client={client}",
+            "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b",
+            "--merge-output-format", "mp4",
+            "-o", output_tpl,
+            "--no-warnings",
+            video_url,
+        ]
+        if cookies_path.exists():
+            cmd.extend(["--cookies", str(cookies_path)])
+
+        for attempt in range(1, 3):
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            if r.returncode == 0:
+                for f in TMP_DIR.glob(f"{video_id}.*"):
+                    if f.suffix in (".mp4", ".mkv", ".webm"):
+                        print(f"  ✅ Downloaded: {f} ({f.stat().st_size} bytes) via {client}")
+                        return str(f)
+            print(f"    ⚠️ attempt {attempt} with {client} failed: {r.stderr[-200:]}")
+            time.sleep(5)
+
+    raise RuntimeError("All download attempts failed with both default and android clients")
 
 
 # ═══════════════════════════════════════════════════
