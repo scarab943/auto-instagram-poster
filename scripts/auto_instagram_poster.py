@@ -110,47 +110,68 @@ def download_video(video_id):
     print(f"Downloading video {video_id} via Apps Script...")
     video_url = f"https://www.youtube.com/watch?v={video_id}"
 
-    try:
-        # ۱. آماده‌سازی فایل کوکی
-        cookies_path = TMP_DIR / "cookies.txt"
-        if YOUTUBE_COOKIES:
-            cookies_path.write_text(YOUTUBE_COOKIES)
-            print("Using cookies for yt-dlp.")
+    # ═══ تلاش مجدد برای غلبه بر خطای "The page needs to be reloaded" ═══
+    max_retries = 5
+    last_error = None
 
-        # ۲. گرفتن لینک مستقیم با yt-dlp (با کوکی)
-        cmd = [
-            "yt-dlp", "--get-url", "--no-warnings",
-            "-f", "best[height<=720]",
-            video_url,
-        ]
-        if cookies_path.exists():
-            cmd.extend(["--cookies", str(cookies_path)])
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"  [Attempt {attempt}/{max_retries}] Getting direct URL...")
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if result.returncode != 0 or not result.stdout.strip():
-            raise RuntimeError(f"yt-dlp failed: {result.stderr[-500:]}")
+            # ۱. آماده‌سازی فایل کوکی
+            cookies_path = TMP_DIR / "cookies.txt"
+            if YOUTUBE_COOKIES:
+                cookies_path.write_text(YOUTUBE_COOKIES)
 
-        direct_url = result.stdout.strip().split("\n")[0]
-        print("Direct URL obtained.")
+            # ۲. گرفتن لینک مستقیم با yt-dlp (با کوکی)
+            cmd = [
+                "yt-dlp", "--get-url", "--no-warnings",
+                "-f", "best[height<=720]",
+                video_url,
+            ]
+            if cookies_path.exists():
+                cmd.extend(["--cookies", str(cookies_path)])
 
-        # ۳. دانلود فایل از طریق Apps Script
-        status, headers, content = apps_script_request(
-            direct_url, method="GET",
-            headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-49999999"}
-        )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
-        if status not in (200, 206):
-            raise RuntimeError(f"Download failed: status {status}")
+            if result.returncode != 0 or not result.stdout.strip():
+                error_msg = result.stderr.strip()
+                # اگه خطای "reload" بود، دوباره تلاش کن
+                if "The page needs to be reloaded" in error_msg:
+                    print(f"  ⚠️ YouTube requested reload. Waiting 5s and retrying...")
+                    time.sleep(5)
+                    last_error = error_msg
+                    continue
+                else:
+                    # خطای دیگه‌ای هست، تلاش نکن
+                    raise RuntimeError(f"yt-dlp failed: {error_msg[-500:]}")
 
-        output_path = TMP_DIR / f"{video_id}.mp4"
-        output_path.write_bytes(content)
-        print(f"Downloaded: {output_path} ({len(content)} bytes)")
-        return str(output_path)
+            direct_url = result.stdout.strip().split("\n")[0]
+            print("  ✅ Direct URL obtained.")
 
-    except Exception as e:
-        print(f"Download error: {e}")
-        raise
+            # ۳. دانلود فایل از طریق Apps Script
+            status, headers, content = apps_script_request(
+                direct_url, method="GET",
+                headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-49999999"}
+            )
 
+            if status not in (200, 206):
+                raise RuntimeError(f"Download failed: status {status}")
+
+            output_path = TMP_DIR / f"{video_id}.mp4"
+            output_path.write_bytes(content)
+            print(f"  ✅ Downloaded: {output_path} ({len(content)} bytes)")
+            return str(output_path)
+
+        except RuntimeError:
+            raise
+        except Exception as e:
+            last_error = str(e)
+            print(f"  ⚠️ Attempt {attempt} failed: {e}")
+            if attempt < max_retries:
+                time.sleep(5)
+
+    raise RuntimeError(f"All {max_retries} attempts failed. Last error: {last_error}")
 
 # ═══════════════════════════════════════════════════
 # استخراج صدا + Whisper
