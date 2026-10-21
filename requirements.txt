@@ -1,5 +1,6 @@
 yt-dlp[default]
 faster-whisper
+av==12.3.0
 requests
 google-genai
 instagrapi
