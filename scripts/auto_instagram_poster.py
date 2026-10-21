@@ -27,6 +27,7 @@ APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxVbY5-Kz4tLjx8KjiVBp
 APPS_SCRIPT_AUTH_KEY = "reza81697"
 
 WARP_PROXY = "socks5://127.0.0.1:40000"
+PO_TOKEN_PROVIDER_URL = "http://127.0.0.1:4416"
 
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
@@ -114,96 +115,76 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو (URL via WARP + download via Apps Script با هدر کامل)
+# دانلود ویدیو (با PO Token Provider و زنجیره Fallback)
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
-    print(f"Downloading video {video_id} via WARP (URL) + Apps Script (download)...")
+    print(f"Downloading video {video_id} via WARP proxy + PO Token Provider...")
     video_url = f"https://www.youtube.com/watch?v={video_id}"
+    output_tpl = str(TMP_DIR / f"{video_id}.%(ext)s")
 
     cookies_path = TMP_DIR / "cookies.txt"
     if YOUTUBE_COOKIES:
         cookies_path.write_text(YOUTUBE_COOKIES)
 
-    # مرحله 1: گرفتن لینک مستقیم با yt-dlp
-    url_attempts = [
-        {"name": "android_vr", "args": ["--extractor-args", "youtube:player_client=android_vr"]},
-        {"name": "ios", "args": ["--extractor-args", "youtube:player_client=ios"]},
-        {"name": "android", "args": ["--extractor-args", "youtube:player_client=android"]},
-        {"name": "auto", "args": []},
+    # زنجیره تلاش: ابتدا کلاینت‌هایی که با PO Token کار می‌کنند، سپس fallback
+    attempts = [
+        {
+            "name": "android_vr (with PO Token)",
+            "args": ["--extractor-args", f"youtube:player_client=android_vr;po_token_provider={PO_TOKEN_PROVIDER_URL}"],
+            "format": "best[ext=mp4]/best",
+        },
+        {
+            "name": "web_embedded (with PO Token)",
+            "args": ["--extractor-args", f"youtube:player_client=web_embedded;po_token_provider={PO_TOKEN_PROVIDER_URL}"],
+            "format": "best[ext=mp4]/best",
+        },
+        {
+            "name": "ios (with PO Token)",
+            "args": ["--extractor-args", f"youtube:player_client=ios;po_token_provider={PO_TOKEN_PROVIDER_URL}"],
+            "format": "best[ext=mp4]/best",
+        },
+        {
+            "name": "tv (with PO Token)",
+            "args": ["--extractor-args", f"youtube:player_client=tv;po_token_provider={PO_TOKEN_PROVIDER_URL}"],
+            "format": "best[ext=mp4]/best",
+        },
+        {
+            "name": "android (no PO Token, format 18 fallback)",
+            "args": ["--extractor-args", "youtube:player_client=android"],
+            "format": "18/best[ext=mp4]/best",
+        },
     ]
 
-    direct_url = None
-    for att in url_attempts:
-        try:
-            print(f"  [URL] Trying client={att['name']}...")
-            cmd = [
-                "yt-dlp", "--get-url", "--no-warnings",
-                "--proxy", WARP_PROXY,
-                "--no-check-certificates",
-                "-f", "best[ext=mp4]/best",
-                *att["args"],
-                video_url,
-            ]
-            if cookies_path.exists():
-                cmd.extend(["--cookies", str(cookies_path)])
+    for att in attempts:
+        print(f"  [Download] Trying client={att['name']}...")
+        cmd = [
+            "yt-dlp",
+            "--proxy", WARP_PROXY,
+            "--no-check-certificates",
+            "--merge-output-format", "mp4",
+            "-f", att["format"],
+            "-o", output_tpl,
+            "--no-warnings",
+            "--retries", "3",
+            "--fragment-retries", "3",
+            *att["args"],
+            video_url,
+        ]
+        if cookies_path.exists():
+            cmd.extend(["--cookies", str(cookies_path)])
 
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-            if r.returncode == 0 and r.stdout.strip():
-                urls = [u for u in r.stdout.strip().split("\n") if u.strip()]
-                if urls:
-                    direct_url = urls[0]
-                    print(f"  ✅ Direct URL obtained (client={att['name']})")
-                    break
-            print(f"    ⚠️ client={att['name']} failed: {r.stderr.strip()[-150:]}")
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            if r.returncode == 0:
+                for f in TMP_DIR.glob(f"{video_id}.*"):
+                    if f.suffix in (".mp4", ".mkv", ".webm"):
+                        print(f"  ✅ Downloaded: {f} ({f.stat().st_size} bytes) via {att['name']}")
+                        return str(f)
+            print(f"    ⚠️ client={att['name']} failed: {r.stderr.strip()[-200:]}")
         except Exception as e:
             print(f"    ⚠️ client={att['name']} error: {e}")
 
-    if not direct_url:
-        raise RuntimeError("Could not get direct URL from yt-dlp with any client")
-
-    # مرحله 2: دانلود از طریق Apps Script با هدرهای کامل
-    print(f"  [Download] Fetching via Apps Script with full headers...")
-
-    download_headers_variants = [
-        {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://www.youtube.com/",
-            "Origin": "https://www.youtube.com",
-            "Accept": "*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Range": "bytes=0-49999999",
-        },
-        {
-            "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
-            "Accept": "*/*",
-        },
-        {
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "*/*",
-        },
-    ]
-
-    last_error = None
-    for i, headers in enumerate(download_headers_variants, 1):
-        try:
-            print(f"    [Try {i}] Sending with headers: {list(headers.keys())}")
-            status, resp_headers, content = apps_script_request(
-                direct_url, method="GET", headers=headers
-            )
-
-            if status in (200, 206) and content and len(content) > 10000:
-                output_path = TMP_DIR / f"{video_id}.mp4"
-                output_path.write_bytes(content)
-                print(f"  ✅ Downloaded: {len(content)} bytes (try {i})")
-                return str(output_path)
-            else:
-                last_error = f"status={status}, size={len(content) if content else 0}"
-                print(f"    ⚠️ try {i} failed: {last_error}")
-        except Exception as e:
-            last_error = str(e)
-            print(f"    ⚠️ try {i} error: {e}")
-
-    raise RuntimeError(f"Apps Script download failed after all attempts: {last_error}")
+    raise RuntimeError("All download attempts failed")
 
 
 # ═══════════════════════════════════════════════════
