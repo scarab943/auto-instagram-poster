@@ -126,7 +126,6 @@ def download_video(video_id):
     if YOUTUBE_COOKIES:
         cookies_path.write_text(YOUTUBE_COOKIES)
 
-    # تنظیمات اصلی: استفاده از Deno به عنوان موتور JS و فعال‌سازی PO Token Provider
     base_args = [
         "--proxy", WARP_PROXY,
         "--no-check-certificates",
@@ -135,16 +134,13 @@ def download_video(video_id):
         "--no-warnings",
         "--retries", "3",
         "--fragment-retries", "3",
-        # *** کلید حل مشکل: استفاده از Deno برای حل n-challenge ***
         "--js-runtimes", "deno",
-        # فعال‌سازی PO Token Provider
         "--extractor-args", f"youtube:player_client=android_vr,web_embedded;youtubepot-bgutilhttp:base_url={PO_TOKEN_PROVIDER_URL}",
     ]
 
     if cookies_path.exists():
         base_args.extend(["--cookies", str(cookies_path)])
 
-    # زنجیره فرمت‌های جایگزین
     formats_to_try = [
         "best[ext=mp4]/best",
         "18/22/17/36",
