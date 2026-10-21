@@ -19,11 +19,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Install FFmpeg & Fonts
         run: |
           sudo apt-get update -qq
@@ -34,6 +29,13 @@ jobs:
           cp /tmp/vazir/*.ttf ~/.fonts/ 2>/dev/null || true
           fc-cache -f
 
+      - name: Install Deno (JavaScript Runtime for yt-dlp)
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.deno/bin:$PATH"
+          deno --version
+
       - name: Install Python deps
         run: pip install -r requirements.txt
 
@@ -41,9 +43,9 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /tmp/bgutil
           cd /tmp/bgutil/server
-          npm install --production
-          nohup node build/main.js --port 4416 &> /tmp/bgutil.log &
-          sleep 3
+          deno install --allow-scripts=npm:canvas --frozen
+          nohup deno run --allow-net --allow-env --allow-ffi build/main.js --port 4416 &> /tmp/bgutil.log &
+          sleep 5
           echo "✅ BGutil PO Token Provider is running on port 4416"
 
       - name: Setup WARP VPN
@@ -58,7 +60,6 @@ jobs:
           warp-cli --accept-tos connect
           sleep 5
           echo "✅ WARP VPN connected"
-          curl -s --socks5 127.0.0.1:40000 https://cloudflare.com/cdn-cgi/trace | grep ip=
 
       - name: Run Auto Poster
         env:
