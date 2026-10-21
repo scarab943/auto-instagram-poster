@@ -30,7 +30,7 @@ WARP_PROXY = "socks5://127.0.0.1:40000"
 
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
-MAX_SEGMENT_DURATION = 180
+MAX_SEGMENT_DURATION = 90  # استاندارد اینستاگرام برای Reels
 
 GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -68,7 +68,7 @@ def apps_script_request(url, method="GET", headers=None):
         "u": url,
         "h": headers or {"User-Agent": "Mozilla/5.0"},
     }
-    r = requests.post(APPS_SCRIPT_URL, json=payload, timeout=120)
+    r = requests.post(APPS_SCRIPT_URL, json=payload, timeout=300)
     r.raise_for_status()
     data = r.json()
     if "e" in data:
@@ -98,71 +98,42 @@ def fetch_channel_videos(channel_url):
 
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو (WARP + فرمت کاملاً آزاد)
+# دانلود ویدیو (اصلاح شده با زنجیره فرمت و yt-dlp مستقیم)
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
     print(f"Downloading video {video_id} via WARP proxy...")
     video_url = f"https://www.youtube.com/watch?v={video_id}"
+    output_tpl = str(TMP_DIR / f"{video_id}.%(ext)s")
 
-    max_retries = 3
-    last_error = None
+    cookies_path = TMP_DIR / "cookies.txt"
+    if YOUTUBE_COOKIES:
+        cookies_path.write_text(YOUTUBE_COOKIES)
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            print(f"  [Attempt {attempt}/{max_retries}] Getting direct URL...")
+    cmd = [
+        "yt-dlp",
+        "--proxy", WARP_PROXY,
+        "--extractor-args", "youtube:player_client=android,ios,web_safari",
+        "--user-agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+        "-f", "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b/worst",
+        "--merge-output-format", "mp4",
+        "-o", output_tpl,
+        "--no-warnings",
+        video_url,
+    ]
+    if cookies_path.exists():
+        cmd.extend(["--cookies", str(cookies_path)])
 
-            cookies_path = TMP_DIR / "cookies.txt"
-            if YOUTUBE_COOKIES:
-                cookies_path.write_text(YOUTUBE_COOKIES)
+    for attempt in range(1, 4):
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        if r.returncode == 0:
+            for f in TMP_DIR.glob(f"{video_id}.*"):
+                if f.suffix in (".mp4", ".mkv", ".webm"):
+                    print(f"  ✅ Downloaded: {f} ({f.stat().st_size} bytes)")
+                    return str(f)
+        print(f"  ⚠️ attempt {attempt} failed: {r.stderr[-300:]}")
+        time.sleep(10)
 
-            # فرمت کاملاً آزاد: بهترین فرمتی که موجوده
-            cmd = [
-                "yt-dlp", "--get-url", "--no-warnings",
-                "--proxy", WARP_PROXY,
-                "--extractor-args", "youtube:player_client=android,ios,web_safari",
-                "--user-agent", "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
-                "-f", "best/bv*+ba/worst",
-                video_url,
-            ]
-            if cookies_path.exists():
-                cmd.extend(["--cookies", str(cookies_path)])
-
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-
-            if result.returncode != 0 or not result.stdout.strip():
-                error_msg = result.stderr.strip()
-                print(f"  ⚠️ Attempt {attempt} failed: {error_msg[-300:]}")
-                last_error = error_msg
-                time.sleep(10)
-                continue
-
-            urls = result.stdout.strip().split("\n")
-            if not urls or not urls[0]:
-                raise RuntimeError("No URL returned from yt-dlp")
-            
-            direct_url = urls[0]
-            print(f"  ✅ Direct URL obtained")
-
-            status, headers, content = apps_script_request(
-                direct_url, method="GET",
-                headers={"User-Agent": "Mozilla/5.0", "Range": "bytes=0-49999999"}
-            )
-
-            if status not in (200, 206):
-                raise RuntimeError(f"Download failed: status {status}")
-
-            output_path = TMP_DIR / f"{video_id}.mp4"
-            output_path.write_bytes(content)
-            print(f"  ✅ Downloaded: {len(content)} bytes")
-            return str(output_path)
-
-        except Exception as e:
-            last_error = str(e)
-            print(f"  ⚠️ Attempt {attempt} error: {e}")
-            if attempt < max_retries:
-                time.sleep(10)
-
-    raise RuntimeError(f"All {max_retries} attempts failed: {last_error}")
+    raise RuntimeError("All download attempts failed")
 
 
 # ═══════════════════════════════════════════════════
@@ -234,7 +205,7 @@ def build_srt(segments, output_path):
 
 
 # ═══════════════════════════════════════════════════
-# تقسیم و زیرنویس
+# تقسیم و زیرنویس (استانداردسازی برای اینستاگرام)
 # ═══════════════════════════════════════════════════
 def get_duration(video_path):
     r = subprocess.run(
@@ -248,7 +219,7 @@ def get_duration(video_path):
 def split_and_subtitle(video_path, srt_path, duration):
     num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) + (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
     part_duration = duration / num_parts
-    print(f"Splitting into {num_parts} parts")
+    print(f"Splitting into {num_parts} parts (max {MAX_SEGMENT_DURATION}s each) for Instagram Reels standard.")
 
     outputs = []
     for i in range(num_parts):
@@ -257,6 +228,7 @@ def split_and_subtitle(video_path, srt_path, duration):
         out_path = str(TMP_DIR / f"part_{i+1}.mp4")
 
         vf = (
+            f"scale=-2:1920,crop=1080:1920,"  # استانداردسازی به 9:16
             f"subtitles={srt_path}:force_style="
             f"'FontName=Vazir,FontSize=18,PrimaryColour=&H0000FFFF,"
             f"OutlineColour=&H80000000,BorderStyle=3,BackColour=&H80000000,"
@@ -267,7 +239,9 @@ def split_and_subtitle(video_path, srt_path, duration):
             ["ffmpeg", "-y", "-ss", str(start), "-to", str(end),
              "-i", video_path, "-vf", vf,
              "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-             "-c:a", "aac", "-b:a", "128k", out_path],
+             "-c:a", "aac", "-b:a", "128k",
+             "-movflags", "+faststart",
+             out_path],
             check=True, capture_output=True, timeout=900,
         )
         outputs.append(out_path)
@@ -284,11 +258,12 @@ def generate_caption(video_title, translated_text):
     prompt = f"""تو یک کپی‌رایتر حرفه‌ای برای اینستاگرام هستی.
 عنوان: {video_title}
 متن: {translated_text[:800]}
-یه کپشن جذاب فارسی با ۵-۸ ایموجی و ۵-۸ هشتگ بنویس. فقط کپشن."""
+یه کپشن جذاب و کوتاه فارسی با ۵-۸ ایموجی و ۵-۸ هشتگ مرتبط با موضوع بنویس. فقط متن کپشن و هشتگ‌ها را برگردان."""
     try:
-        r = GEMINI_CLIENT.models.generate_content(model="gemini-flash-latest", contents=prompt)
+        r = GEMINI_CLIENT.models.generate_content(model="gemini-1.5-flash", contents=prompt)
         return r.text.strip()
-    except Exception:
+    except Exception as e:
+        print(f"Gemini error: {e}")
         return fallback
 
 
@@ -354,7 +329,7 @@ def main():
             part_caption = f"قسمت {i} از {len(parts)}\n\n{caption}"
             media_id = upload_to_instagram(part, part_caption)
             print(f"Posted part {i}/{len(parts)}: {media_id}")
-            time.sleep(60)
+            time.sleep(60)  # تاخیر برای جلوگیری از بلاک شدن
 
         state["stats"]["success"] += 1
         state["queue_index"] += 1
