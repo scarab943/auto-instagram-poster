@@ -37,7 +37,9 @@ jobs:
           deno --version
 
       - name: Install Python deps
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install --no-deps "moviepy==2.2.1"
 
       - name: Setup BGutil PO Token Provider
         run: |
