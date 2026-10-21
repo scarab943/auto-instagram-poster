@@ -31,7 +31,8 @@ PO_TOKEN_PROVIDER_URL = "http://127.0.0.1:4416"
 
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
-MAX_SEGMENT_DURATION = 90  # استاندارد اینستاگرام برای Reels
+MAX_SEGMENT_DURATION = 90   # حداکثر طول هر قطعه (ثانیه)
+SKIP_INTRO_SECONDS = 15     # چند ثانیه اول ویدیو زیرنویس نشود (توضیحات/مقدمه)
 
 GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -126,18 +127,12 @@ def download_video(video_id):
     if cookies_path.exists():
         base_args.extend(["--cookies", str(cookies_path)])
 
-    formats_to_try = [
-        "best[ext=mp4]/best",
-        "18/22/17/36",
-        "bv*+ba/b",
-        "worst",
-    ]
-
+    formats_to_try = ["best[ext=mp4]/best", "18/22/17/36", "bv*+ba/b", "worst"]
     last_error = None
+
     for fmt in formats_to_try:
         print(f"  [Download] Trying format: {fmt}...")
         cmd = ["yt-dlp", "-f", fmt] + base_args + [video_url]
-
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
             if r.returncode == 0:
@@ -171,7 +166,11 @@ def transcribe(audio_path):
     print("Transcribing with Whisper...")
     model = WhisperModel("small", device="cpu", compute_type="int8")
     segments, _ = model.transcribe(audio_path, vad_filter=True)
-    return [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
+    all_segs = [{"start": s.start, "end": s.end, "text": s.text.strip()} for s in segments]
+    # حذف زیرنویس مقدمه/توضیحات اول ویدیو
+    filtered = [s for s in all_segs if s["start"] >= SKIP_INTRO_SECONDS]
+    print(f"Total segments: {len(all_segs)} → after skipping intro: {len(filtered)}")
+    return filtered
 
 
 # ═══════════════════════════════════════════════════
@@ -204,9 +203,11 @@ def translate_segments(segments):
 
 
 # ═══════════════════════════════════════════════════
-# SRT
+# SRT (ساخت SRT اختصاصی برای هر قطعه)
 # ═══════════════════════════════════════════════════
 def format_time(seconds):
+    if seconds < 0:
+        seconds = 0
     ms = int((seconds - int(seconds)) * 1000)
     s = int(seconds) % 60
     m = int(seconds) // 60 % 60
@@ -214,16 +215,27 @@ def format_time(seconds):
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def build_srt(segments, output_path):
+def build_part_srt(segments, part_start, part_end, output_path):
+    """SRT اختصاصی برای یک قطعه با زمان‌بندی نسبی (از صفر)"""
     with open(output_path, "w", encoding="utf-8") as f:
-        for i, seg in enumerate(segments, 1):
-            f.write(f"{i}\n")
-            f.write(f"{format_time(seg['start'])} --> {format_time(seg['end'])}\n")
+        idx = 1
+        for seg in segments:
+            seg_start = seg["start"]
+            seg_end = seg["end"]
+            if seg_end <= part_start or seg_start >= part_end:
+                continue
+            rel_start = max(0.0, seg_start - part_start)
+            rel_end = min(part_end - part_start, seg_end - part_start)
+            if rel_end <= rel_start:
+                continue
+            f.write(f"{idx}\n")
+            f.write(f"{format_time(rel_start)} --> {format_time(rel_end)}\n")
             f.write(f"{seg['text']}\n\n")
+            idx += 1
 
 
 # ═══════════════════════════════════════════════════
-# تقسیم و زیرنویس (استانداردسازی برای اینستاگرام)
+# تقسیم و زیرنویس (بدون کشیدگی - با Blur Background)
 # ═══════════════════════════════════════════════════
 def get_duration(video_path):
     r = subprocess.run(
@@ -234,28 +246,39 @@ def get_duration(video_path):
     return float(r.stdout.strip())
 
 
-def split_and_subtitle(video_path, srt_path, duration):
+def split_and_subtitle(video_path, translated_segments, duration):
     num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) + (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
     part_duration = duration / num_parts
     print(f"Splitting into {num_parts} parts (max {MAX_SEGMENT_DURATION}s each) for Instagram Reels standard.")
 
     outputs = []
     for i in range(num_parts):
-        start = i * part_duration
-        end = min((i + 1) * part_duration, duration)
+        part_start = i * part_duration
+        part_end = min((i + 1) * part_duration, duration)
+        part_len = part_end - part_start
         out_path = str(TMP_DIR / f"part_{i+1}.mp4")
+        part_srt = str(TMP_DIR / f"part_{i+1}.srt")
 
-        vf = (
-            f"scale=-2:1920,crop=1080:1920,"
-            f"subtitles={srt_path}:force_style="
-            f"'FontName=Vazir,FontSize=18,PrimaryColour=&H0000FFFF,"
-            f"OutlineColour=&H80000000,BorderStyle=3,BackColour=&H80000000,"
-            f"Outline=1,Shadow=0,MarginV=80,Alignment=2'"
+        # 1. ساخت SRT مخصوص این قطعه
+        build_part_srt(translated_segments, part_start, part_end, part_srt)
+
+        # 2. فیلتر ffmpeg: پس‌زمینه بلور + ویدیو دست‌نخورده در مرکز + زیرنویس
+        filter_complex = (
+            f"[0:v]split=2[orig1][orig2];"
+            f"[orig1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:3[bg];"
+            f"[orig2]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[vid];"
+            f"[vid]subtitles={part_srt}:force_style='FontName=Vazir,FontSize=14,"
+            f"PrimaryColour=&H0000FFFF,OutlineColour=&H80000000,BorderStyle=3,"
+            f"BackColour=&H80000000,Outline=1,Shadow=0,MarginV=40,Alignment=2'[vout]"
         )
 
         subprocess.run(
-            ["ffmpeg", "-y", "-ss", str(start), "-to", str(end),
-             "-i", video_path, "-vf", vf,
+            ["ffmpeg", "-y",
+             "-ss", str(part_start), "-t", str(part_len),
+             "-i", video_path,
+             "-filter_complex", filter_complex,
+             "-map", "[vout]", "-map", "0:a:0?",
              "-c:v", "libx264", "-preset", "fast", "-crf", "23",
              "-c:a", "aac", "-b:a", "128k",
              "-movflags", "+faststart",
@@ -263,6 +286,8 @@ def split_and_subtitle(video_path, srt_path, duration):
             check=True, capture_output=True, timeout=900,
         )
         outputs.append(out_path)
+        print(f"  ✅ Part {i+1}/{num_parts} built.")
+
     return outputs
 
 
@@ -278,7 +303,6 @@ def generate_caption(video_title, translated_text):
 متن: {translated_text[:800]}
 یه کپشن جذاب و کوتاه فارسی با ۵-۸ ایموجی و ۵-۸ هشتگ مرتبط با موضوع بنویس. فقط متن کپشن و هشتگ‌ها را برگردان."""
     try:
-        # مدل به gemini-3.8-flash تغییر کرد
         r = GEMINI_CLIENT.models.generate_content(model="gemini-3.8-flash", contents=prompt)
         return r.text.strip()
     except Exception as e:
@@ -335,11 +359,8 @@ def main():
         segments = transcribe(audio_path)
         translated = translate_segments(segments)
 
-        srt_path = str(TMP_DIR / "sub.srt")
-        build_srt(translated, srt_path)
-
         duration = get_duration(video_path)
-        parts = split_and_subtitle(video_path, srt_path, duration)
+        parts = split_and_subtitle(video_path, translated, duration)
 
         full_text = " ".join(s["text"] for s in translated)
         caption = generate_caption(video["title"], full_text)
