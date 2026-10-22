@@ -14,6 +14,11 @@ from faster_whisper import WhisperModel
 from google import genai
 from instagrapi import Client
 
+# برای ساخت کاور فارسی
+import arabic_reshaper
+from bidi.algorithm import get_display
+from PIL import Image, ImageDraw, ImageFont
+
 # ═══════════════════════════════════════════════════
 # تنظیمات
 # ═══════════════════════════════════════════════════
@@ -32,11 +37,14 @@ PO_TOKEN_PROVIDER_URL = "http://127.0.0.1:4416"
 
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
-MAX_SEGMENT_DURATION = 90   # حداکثر طول هر قطعه (ثانیه)
-OVERLAP_SECONDS = 3         # همپوشانی بین قسمت‌ها (برای قسمت‌های ۲ به بعد)
-MAX_CHARS_PER_SUB = 40      # حداکثر کاراکتر در هر زیرنویس
+MAX_SEGMENT_DURATION = 90
+OVERLAP_SECONDS = 3
+MAX_CHARS_PER_SUB = 40
 
 GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+# فلگ سراسری برای مدیریت سهمیه Gemini
+_gemini_quota_exhausted = False
 
 
 # ═══════════════════════════════════════════════════
@@ -171,7 +179,7 @@ def transcribe(audio_path):
 
 
 # ═══════════════════════════════════════════════════
-# ترجمه و شکستن جملات
+# ترجمه
 # ═══════════════════════════════════════════════════
 def translate_text(text):
     if not text.strip():
@@ -190,7 +198,6 @@ def translate_text(text):
 
 
 def merge_segments(segments, max_chars=150):
-    """ادغام سگمنت‌های کوتاه برای ترجمه بهتر"""
     merged = []
     current = None
     for seg in segments:
@@ -220,7 +227,6 @@ def translate_segments(segments):
 
 
 def split_long_segment(seg):
-    """شکستن جملات طولانی فارسی به تکه‌های کوچک‌تر"""
     text = seg["text"].strip()
     if len(text) <= MAX_CHARS_PER_SUB:
         return [seg]
@@ -284,7 +290,6 @@ def format_time(seconds):
 
 
 def build_full_srt(segments, output_path):
-    """ساخت یک SRT کامل برای کل ویدیو"""
     with open(output_path, "w", encoding="utf-8") as f:
         idx = 1
         prev_end = 0.0
@@ -301,13 +306,15 @@ def build_full_srt(segments, output_path):
 
 
 # ═══════════════════════════════════════════════════
-# کپشن و خلاصه اختصاصی برای هر قسمت
+# کپشن با مدیریت خطای 429
 # ═══════════════════════════════════════════════════
 def generate_caption(video_title, part_text, part_num, total_parts):
+    global _gemini_quota_exhausted
     fallback = f"🎬 {video_title}\n\nقسمت {part_num}: {part_text[:300]}...\n\n#داستان #انگیزشی #موفقیت #توسعه_فردی #انگیزه #زندگی"
-    if not GEMINI_CLIENT:
+    
+    if not GEMINI_CLIENT or _gemini_quota_exhausted:
         return fallback
-        
+    
     prompt = f"""تو یک کپی‌رایتر حرفه‌ای برای اینستاگرام هستی.
 این متن، مربوط به قسمت {part_num} از {total_parts} یک ویدیو است:
 "{part_text}"
@@ -324,14 +331,105 @@ def generate_caption(video_title, part_text, part_num, total_parts):
             r = GEMINI_CLIENT.models.generate_content(model="gemini-3.8-flash", contents=prompt)
             return r.text.strip()
         except Exception as e:
-            print(f"Gemini error (attempt {attempt+1}): {e}")
-            time.sleep(5)
+            err_str = str(e)
+            is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower()
+            is_server_busy = "503" in err_str or "UNAVAILABLE" in err_str
             
+            if is_rate_limit:
+                print(f"  ⚠️ Gemini rate limit (attempt {attempt+1}). Waiting 90s...")
+                if attempt == 0:
+                    telegram("⚠️ محدودیت Gemini فعال شد. منتظر می‌مونم...")
+                time.sleep(90)
+            elif is_server_busy:
+                print(f"  ⚠️ Gemini server busy (attempt {attempt+1}). Waiting 30s...")
+                time.sleep(30)
+            else:
+                print(f"  ⚠️ Gemini error (attempt {attempt+1}): {e}")
+                time.sleep(10)
+    
+    # بعد از همه تلاش‌ها، از کپشن پیش‌فرض استفاده کن و فلگ بزن
+    _gemini_quota_exhausted = True
+    print("❌ Gemini quota exhausted. Using fallback for remaining parts.")
+    telegram("⚠️ محدودیت Gemini تمام شد. از کپشن پیش‌فرض استفاده می‌شه.")
     return fallback
 
 
 # ═══════════════════════════════════════════════════
-# پردازش کامل ویدیو و سپس برش (با همپوشانی ۳ ثانیه)
+# ساخت کاور اختصاصی برای هر قسمت
+# ═══════════════════════════════════════════════════
+def create_part_thumbnail(video_path, part_num, output_path):
+    """استخراج فریم اول ویدیو و اضافه کردن شماره قسمت با فونت بزرگ"""
+    try:
+        frame_path = str(TMP_DIR / f"frame_{part_num}.jpg")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", video_path, "-vframes", "1", "-q:v", "2", frame_path],
+            check=True, capture_output=True, timeout=120,
+        )
+        
+        if not os.path.exists(frame_path):
+            print(f"⚠️ Could not extract frame for part {part_num}")
+            return None
+        
+        img = Image.open(frame_path).convert("RGB")
+        
+        # اطمینان از ابعاد استاندارد (1080x1920)
+        if img.width != 1080 or img.height != 1920:
+            img = img.resize((1080, 1920), Image.LANCZOS)
+        
+        draw = ImageDraw.Draw(img)
+        
+        # پیدا کردن فونت وزیر
+        font_candidates = []
+        fonts_dir = os.path.expanduser("~/.fonts")
+        if os.path.isdir(fonts_dir):
+            for f in sorted(os.listdir(fonts_dir)):
+                if f.endswith(".ttf"):
+                    font_candidates.append(os.path.join(fonts_dir, f))
+        
+        font_path = font_candidates[0] if font_candidates else None
+        
+        # فونت خیلی بزرگ (۲۰٪ عرض تصویر)
+        font_size = int(img.width * 0.20)
+        if font_path:
+            font = ImageFont.truetype(font_path, font_size)
+        else:
+            font = ImageFont.load_default()
+        
+        # متن فارسی
+        text = f"قسمت {part_num}"
+        try:
+            shaped = arabic_reshaper.reshape(text)
+            text_ready = get_display(shaped)
+        except Exception:
+            text_ready = text
+        
+        # موقعیت مرکز
+        bbox = draw.textbbox((0, 0), text_ready, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        x = (img.width - text_w) // 2
+        y = (img.height - text_h) // 2
+        
+        # سایه (خط دور)
+        for dx in [-6, -3, 0, 3, 6]:
+            for dy in [-6, -3, 0, 3, 6]:
+                if dx == 0 and dy == 0:
+                    continue
+                draw.text((x+dx, y+dy), text_ready, font=font, fill=(0, 0, 0))
+        
+        # متن اصلی زرد
+        draw.text((x, y), text_ready, font=font, fill=(255, 255, 0))
+        
+        img.save(output_path, "JPEG", quality=90)
+        print(f"  ✅ Thumbnail created for part {part_num}")
+        return output_path
+    except Exception as e:
+        print(f"  ⚠️ Thumbnail creation failed for part {part_num}: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════
+# پردازش کل ویدیو
 # ═══════════════════════════════════════════════════
 def get_duration(video_path):
     r = subprocess.run(
@@ -343,7 +441,6 @@ def get_duration(video_path):
 
 
 def process_full_video(video_path, full_srt_path):
-    """چسباندن زیرنویس + پس‌زمینه بلور روی کل ویدیو"""
     print("Processing full video with subtitles and blur background...")
     output_path = str(TMP_DIR / "full_subtitled.mp4")
 
@@ -373,37 +470,33 @@ def process_full_video(video_path, full_srt_path):
 
 
 def split_final_video(processed_video_path, duration, video_title, translated_segments):
-    """برش ویدیوی زیرنویس شده به قطعات ۹۰ ثانیه‌ای با همپوشانی ۳ ثانیه"""
     num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) + (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
     part_duration = duration / num_parts
-    print(f"Splitting processed video into {num_parts} parts (overlap {OVERLAP_SECONDS}s for parts 2+).")
+    print(f"Splitting into {num_parts} parts (overlap {OVERLAP_SECONDS}s for parts 2+).")
 
     outputs = []
     captions = []
+    thumbnails = []
 
     for i in range(num_parts):
-        # محاسبه زمان شروع و پایان با همپوشانی
         if i == 0:
-            # قسمت اول: از صفر
             part_start = 0
         else:
-            # قسمت‌های ۲ به بعد: ۳ ثانیه عقب‌تر
             part_start = max(0, (i * part_duration) - OVERLAP_SECONDS)
         
         part_end = min((i + 1) * part_duration, duration)
         part_len = part_end - part_start
         out_path = str(TMP_DIR / f"part_{i+1}.mp4")
+        thumb_path = str(TMP_DIR / f"part_{i+1}_thumb.jpg")
 
-        # استخراج متن مخصوص همین قسمت (بر اساس زمان‌های اصلی، نه با همپوشانی)
         original_part_start = i * part_duration
         original_part_end = part_end
         part_text = " ".join([s["text"] for s in translated_segments if s["end"] > original_part_start and s["start"] < original_part_end])
         
-        print(f"  [Caption] Generating caption for part {i+1}/{num_parts} (start={part_start:.1f}s, len={part_len:.1f}s)...")
+        print(f"  [Caption] Generating caption for part {i+1}/{num_parts}...")
         part_caption = generate_caption(video_title, part_text, i+1, num_parts)
         captions.append(part_caption)
 
-        # برش ویدیوی زیرنویس شده
         subprocess.run(
             ["ffmpeg", "-y",
              "-ss", str(part_start),
@@ -418,16 +511,24 @@ def split_final_video(processed_video_path, duration, video_title, translated_se
         outputs.append(out_path)
         print(f"  ✅ Part {i+1}/{num_parts} built.")
 
-    return outputs, captions
+        # ساخت کاور اختصاصی
+        print(f"  [Thumbnail] Creating cover for part {i+1}/{num_parts}...")
+        thumb = create_part_thumbnail(out_path, i+1, thumb_path)
+        thumbnails.append(thumb)
+
+    return outputs, captions, thumbnails
 
 
 # ═══════════════════════════════════════════════════
-# آپلود در اینستاگرام
+# آپلود در اینستاگرام (با کاور اختصاصی)
 # ═══════════════════════════════════════════════════
-def upload_to_instagram(video_path, caption):
+def upload_to_instagram(video_path, caption, thumbnail_path=None):
     cl = Client()
     cl.login_by_sessionid(INSTAGRAM_SESSIONID)
-    media = cl.clip_upload(video_path, caption)
+    kwargs = {}
+    if thumbnail_path and os.path.exists(thumbnail_path):
+        kwargs["thumbnail"] = Path(thumbnail_path)
+    media = cl.clip_upload(video_path, caption, **kwargs)
     return str(media.pk)
 
 
@@ -465,29 +566,24 @@ def main():
     print(f"Processing: {video['id']} - {video['title']}")
 
     try:
-        # 1. دانلود
         video_path = download_video(video["id"])
         audio_path = extract_audio(video_path)
-        
-        # 2. ترنسکریپت و ترجمه
         segments = transcribe(audio_path)
         translated = translate_segments(segments)
         translated = split_all_segments(translated)
         
-        # 3. ساخت SRT کامل
         full_srt_path = str(TMP_DIR / "full.srt")
         build_full_srt(translated, full_srt_path)
         
-        # 4. پردازش کل ویدیو (زیرنویس + بلور)
         processed_video = process_full_video(video_path, full_srt_path)
         
-        # 5. برش ویدیوی نهایی + تولید کپشن‌ها (با همپوشانی)
         duration = get_duration(processed_video)
-        parts, part_captions = split_final_video(processed_video, duration, video["title"], translated)
+        parts, part_captions, part_thumbnails = split_final_video(
+            processed_video, duration, video["title"], translated
+        )
 
-        # 6. آپلود
-        for i, (part, part_caption) in enumerate(zip(parts, part_captions), 1):
-            media_id = upload_to_instagram(part, part_caption)
+        for i, (part, caption, thumb) in enumerate(zip(parts, part_captions, part_thumbnails), 1):
+            media_id = upload_to_instagram(part, caption, thumbnail_path=thumb)
             print(f"Posted part {i}/{len(parts)}: {media_id}")
             time.sleep(60)
 
