@@ -270,12 +270,11 @@ def build_full_srt(segments, output_path):
             prev_end = rel_end
 
 # ═══════════════════════════════════════════════════
-# کپشن با مدیریت خطای 429 و بهینه‌سازی Gemini
+# کپشن (اصلاح مدل)
 # ═══════════════════════════════════════════════════
 def generate_caption(video_title, part_text, part_num, total_parts):
     global _gemini_quota_exhausted
     
-    # استخراج کلمات کلیدی ساده برای fallback
     keywords = [w for w in re.findall(r'\b\w{4,}\b', part_text) if w.lower() not in ["this", "that", "with", "your", "from", "have"]]
     hashtags = " ".join([f"#{k}" for k in list(set(keywords))[:5]])
     fallback = f"🎬 {video_title}\n\nبخش {part_num} از {total_parts}:\n{part_text[:250]}...\n\n#انگیزشی #موفقیت #توسعه_فردی {hashtags}"
@@ -292,9 +291,9 @@ def generate_caption(video_title, part_text, part_num, total_parts):
 ۳. حداقل ۶ هشتگ مرتبط با موضوع این قسمت.
 خروجی را به صورت یک متن منسجم و آماده برای پست اینستاگرام (بدون هیچ توضیح اضافه‌ای) برگردان."""
 
-    # فقط ۱ بار تلاش می‌کنیم تا سهمیه محدود هدر نرود
     try:
-        r = GEMINI_CLIENT.models.generate_content(model="gemini-2.0-flash", contents=prompt)
+        # اصلاح نام مدل به gemini-3.8-flash طبق لاگ گوگل
+        r = GEMINI_CLIENT.models.generate_content(model="gemini-3.8-flash", contents=prompt)
         return r.text.strip()
     except Exception as e:
         err_str = str(e)
@@ -302,24 +301,25 @@ def generate_caption(video_title, part_text, part_num, total_parts):
             print(f"  ⚠️ Gemini rate limit hit. Switching to fallback.")
             _gemini_quota_exhausted = True
             telegram("⚠️ محدودیت Gemini فعال شد. از کپشن پیش‌فرض استفاده می‌شه.")
+        elif "404" in err_str:
+            print(f"  ⚠️ Model not found (404). Switching to fallback.")
+            _gemini_quota_exhausted = True
+            telegram("⚠️ مدل Gemini پیدا نشد. از کپشن پیش‌فرض استفاده می‌شه.")
         else:
             print(f"  ⚠️ Gemini error: {e}")
         return fallback
 
 # ═══════════════════════════════════════════════════
-# ابزار تصویر: نوشتن متن فارسی روی تصویر (فیکس شده)
+# ابزار تصویر (بدون تغییر)
 # ═══════════════════════════════════════════════════
 def get_vazir_font(size):
-    """بارگذاری فونت وزیر از مسیر نصب شده در workflow"""
     fonts_dir = os.path.expanduser("~/.fonts")
     if os.path.isdir(fonts_dir):
         for f in sorted(os.listdir(fonts_dir)):
             if f.endswith(".ttf") and "vazir" in f.lower():
                 try:
-                    # استفاده از RAQM برای پشتیبانی از RTL
                     return ImageFont.truetype(os.path.join(fonts_dir, f), size, layout_engine=ImageFont.Layout.RAQM)
-                except Exception as e:
-                    print(f"⚠️ Font load error (RAQM): {e}")
+                except Exception:
                     try:
                         return ImageFont.truetype(os.path.join(fonts_dir, f), size)
                     except:
@@ -328,18 +328,14 @@ def get_vazir_font(size):
     return ImageFont.load_default()
 
 def draw_persian_text(draw, text, font, center_x, center_y, fill=(255, 255, 0)):
-    """نوشتن متن فارسی درست (با استفاده از RTL داخلی PIL و RAQM)"""
     try:
-        # reshape حروف به هم چسبیده
         shaped = arabic_reshaper.reshape(text)
-        # نیازی به get_display نیست چون RAQM با direction="rtl" خودش انجام می‌دهد
         bbox = draw.textbbox((0, 0), shaped, font=font, direction="rtl", language="fa")
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
         x = center_x - text_w // 2
         y = center_y - text_h // 2
         
-        # سایه (Stroke)
         for dx in [-4, -2, 0, 2, 4]:
             for dy in [-4, -2, 0, 2, 4]:
                 if dx == 0 and dy == 0:
@@ -349,17 +345,13 @@ def draw_persian_text(draw, text, font, center_x, center_y, fill=(255, 255, 0)):
         draw.text((x, y), shaped, font=font, fill=fill, direction="rtl", language="fa")
     except Exception as e:
         print(f"⚠️ Draw text error: {e}")
-        # اگر RAQM کار نکرد، سعی می‌کنیم با روش قدیمی
         try:
             from bidi.algorithm import get_display
-            text_ready = get_display(shaped)
+            text_ready = get_display(arabic_reshaper.reshape(text))
             draw.text((center_x, center_y), text_ready, font=font, fill=fill, anchor="mm")
         except:
             pass
 
-# ═══════════════════════════════════════════════════
-# ساخت کاورها
-# ═══════════════════════════════════════════════════
 def create_shared_intro_frame(source_video, output_image):
     try:
         subprocess.run(
@@ -400,14 +392,15 @@ def create_shared_intro_video(shared_frame_path, output_path, total_parts):
         intro_image = str(TMP_DIR / "intro_image.jpg")
         img.save(intro_image, "JPEG", quality=90)
 
-        # ساخت ویدیو ۱ ثانیه‌ای با FPS استاندارد و فرمت یکسان
+        # ساخت Intro با پارامترهای دقیقاً یکسان با ویدیوی اصلی (x264, aac, 30fps, yuv420p)
         subprocess.run(
             ["ffmpeg", "-y", "-loop", "1", "-i", intro_image,
+             "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
              "-t", str(INTRO_DURATION),
-             "-r", "30",  # فریم ریت یکسان
-             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-             "-pix_fmt", "yuv420p",  # فرمت پیکسل یکسان
-             "-an",  # بدون صدا (بعدا اضافه میشه)
+             "-r", "30",
+             "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-b:a", "128k",
+             "-shortest",
              "-movflags", "+faststart",
              output_path],
             check=True, capture_output=True, timeout=300,
@@ -418,7 +411,7 @@ def create_shared_intro_video(shared_frame_path, output_path, total_parts):
         return None
 
 # ═══════════════════════════════════════════════════
-# پردازش کل ویدیو (بدون تغییر)
+# پردازش کل ویدیو
 # ═══════════════════════════════════════════════════
 def get_duration(video_path):
     r = subprocess.run(
@@ -472,7 +465,6 @@ def split_final_video(processed_video_path, duration, video_title, translated_se
         part_caption = generate_caption(video_title, part_text, i+1, num_parts)
         captions.append(part_caption)
 
-        # 1. برش خام
         subprocess.run(
             ["ffmpeg", "-y", "-ss", str(part_start), "-i", processed_video_path,
              "-t", str(part_len),
@@ -482,25 +474,16 @@ def split_final_video(processed_video_path, duration, video_title, translated_se
             check=True, capture_output=True, timeout=900,
         )
 
-        # 2. چسباندن Intro با روش concat filter برای اطمینان از یکسان بودن
+        # چسباندن Intro با روش concat demuxer (مطمئن‌تر)
         if shared_intro_video and os.path.exists(shared_intro_video):
-            intro_with_audio = str(TMP_DIR / "intro_with_audio.mp4")
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", shared_intro_video,
-                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                 "-t", str(INTRO_DURATION),
-                 "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p", "-r", "30",
-                 "-c:a", "aac", "-b:a", "128k",
-                 "-shortest", intro_with_audio],
-                check=True, capture_output=True, timeout=120,
-            )
+            concat_file = str(TMP_DIR / f"concat_{i+1}.txt")
+            with open(concat_file, "w") as f:
+                f.write(f"file '{shared_intro_video}'\n")
+                f.write(f"file '{raw_part_path}'\n")
             
-            # استفاده از filter_complex برای concat دقیق‌تر
             subprocess.run(
-                ["ffmpeg", "-y", "-i", intro_with_audio, "-i", raw_part_path,
-                 "-filter_complex", "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]",
-                 "-map", "[v]", "-map", "[a]",
-                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
+                 "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p",
                  "-c:a", "aac", "-b:a", "128k",
                  "-movflags", "+faststart", final_part_path],
                 check=True, capture_output=True, timeout=900,
@@ -509,7 +492,6 @@ def split_final_video(processed_video_path, duration, video_title, translated_se
         else:
             outputs.append(raw_part_path)
 
-        # 3. ساخت کاور اختصاصی
         frame_path = str(TMP_DIR / f"frame_{i+1}.jpg")
         subprocess.run(
             ["ffmpeg", "-y", "-i", outputs[-1], "-vframes", "1", "-q:v", "2", frame_path],
@@ -582,9 +564,13 @@ def main():
         )
 
         for i, (part, caption, thumb) in enumerate(zip(parts, part_captions, part_thumbnails), 1):
-            media_id = upload_to_instagram(part, caption, thumbnail_path=thumb)
-            print(f"Posted part {i}/{len(parts)}: {media_id}")
-            time.sleep(60)
+            try:
+                media_id = upload_to_instagram(part, caption, thumbnail_path=thumb)
+                print(f"Posted part {i}/{len(parts)}: {media_id}")
+                time.sleep(60)
+            except Exception as upload_err:
+                print(f"❌ Failed to upload part {i}/{len(parts)}: {upload_err}")
+                telegram(f"❌ خطا در آپلود قسمت {i}/{len(parts)}:\n{str(upload_err)[:200]}")
 
         state["stats"]["success"] += 1
         state["queue_index"] += 1
