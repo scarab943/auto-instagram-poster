@@ -341,9 +341,9 @@
       "duration": 419.0
     }
   ],
-  "queue_index": 5,
+  "queue_index": 6,
   "stats": {
     "success": 5,
-    "failed": 0
+    "failed": 1
   }
 }
