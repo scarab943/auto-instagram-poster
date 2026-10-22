@@ -4,3 +4,5 @@ av==12.3.0
 requests
 google-genai
 instagrapi[video]
+arabic-reshaper
+python-bidi
