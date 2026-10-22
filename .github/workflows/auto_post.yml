@@ -8,7 +8,7 @@ on:
 jobs:
   post:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90 # افزایش زمان برای ویدیوهای طولانی
 
     steps:
       - name: Checkout
@@ -19,17 +19,22 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install FFmpeg & Fonts
+      - name: Install FFmpeg, Fonts & libraqm
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg fonts-dejavu
+          # نصب ffmpeg و فونت‌های پیش‌فرض و کتابخانه libraqm برای رندر راست‌چین
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu libraqm0
+          
+          # دانلود فونت وزیر
           wget -q https://github.com/rastikerdar/vazir-font/releases/download/v30.1.0/vazir-font-v30.1.0.zip -O /tmp/vazir.zip
           unzip -q /tmp/vazir.zip -d /tmp/vazir
           mkdir -p ~/.fonts
-          cp /tmp/vazir/*.ttf ~/.fonts/ 2>/dev/null || true
+          
+          # کپی فونت‌ها از زیرپوشه استخراج شده (فیکس باگ قبلی)
+          find /tmp/vazir -name "*.ttf" -exec cp {} ~/.fonts/ \;
           fc-cache -f
 
-      - name: Install Deno (JavaScript Runtime for yt-dlp)
+      - name: Install Deno
         run: |
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
@@ -39,7 +44,7 @@ jobs:
       - name: Install Python deps
         run: |
           pip install -r requirements.txt
-          pip install --no-deps "moviepy==2.2.1"
+          # حذف شد: moviepy==2.2.1 (استفاده نمی‌شود)
 
       - name: Setup BGutil PO Token Provider
         run: |
@@ -77,7 +82,7 @@ jobs:
         if: always()
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.origin "41898282+github-actions[bot]@users.noreply.github.com"
           git add state.json || true
           git diff --staged --quiet || git commit -m "Update state [skip ci]"
           git push || true
