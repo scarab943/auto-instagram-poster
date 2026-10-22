@@ -14,7 +14,6 @@ from faster_whisper import WhisperModel
 from google import genai
 from instagrapi import Client
 
-# برای ساخت کاور فارسی
 import arabic_reshaper
 from bidi.algorithm import get_display
 from PIL import Image, ImageDraw, ImageFont
@@ -40,10 +39,9 @@ TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
 MAX_SEGMENT_DURATION = 90
 OVERLAP_SECONDS = 3
 MAX_CHARS_PER_SUB = 40
+INTRO_DURATION = 1.0  # ثانیه‌های کاور مشترک ابتدای هر قسمت
 
 GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-
-# فلگ سراسری برای مدیریت سهمیه Gemini
 _gemini_quota_exhausted = False
 
 
@@ -230,9 +228,7 @@ def split_long_segment(seg):
     text = seg["text"].strip()
     if len(text) <= MAX_CHARS_PER_SUB:
         return [seg]
-    
     chunks = re.split(r'(?<=[.!?،؛])\s+', text)
-    
     final_chunks = []
     for chunk in chunks:
         if len(chunk) <= MAX_CHARS_PER_SUB:
@@ -247,25 +243,17 @@ def split_long_segment(seg):
                     if current: final_chunks.append(current.strip())
                     current = word + " "
             if current: final_chunks.append(current.strip())
-
     if len(final_chunks) <= 1:
         return [seg]
-
     total_duration = seg["end"] - seg["start"]
     total_chars = sum(len(c) for c in final_chunks)
     current_time = seg["start"]
     new_segs = []
-    
     for chunk in final_chunks:
         if total_chars == 0: break
         chunk_duration = (len(chunk) / total_chars) * total_duration
-        new_segs.append({
-            "start": current_time,
-            "end": current_time + chunk_duration,
-            "text": chunk
-        })
+        new_segs.append({"start": current_time, "end": current_time + chunk_duration, "text": chunk})
         current_time += chunk_duration
-        
     return new_segs
 
 
@@ -298,9 +286,7 @@ def build_full_srt(segments, output_path):
             rel_end = seg["end"]
             if rel_end <= rel_start:
                 continue
-            f.write(f"{idx}\n")
-            f.write(f"{format_time(rel_start)} --> {format_time(rel_end)}\n")
-            f.write(f"{seg['text']}\n\n")
+            f.write(f"{idx}\n{format_time(rel_start)} --> {format_time(rel_end)}\n{seg['text']}\n\n")
             idx += 1
             prev_end = rel_end
 
@@ -311,120 +297,151 @@ def build_full_srt(segments, output_path):
 def generate_caption(video_title, part_text, part_num, total_parts):
     global _gemini_quota_exhausted
     fallback = f"🎬 {video_title}\n\nقسمت {part_num}: {part_text[:300]}...\n\n#داستان #انگیزشی #موفقیت #توسعه_فردی #انگیزه #زندگی"
-    
     if not GEMINI_CLIENT or _gemini_quota_exhausted:
         return fallback
-    
     prompt = f"""تو یک کپی‌رایتر حرفه‌ای برای اینستاگرام هستی.
 این متن، مربوط به قسمت {part_num} از {total_parts} یک ویدیو است:
 "{part_text}"
-
 بر اساس محتوای همین متن، دقیقاً موارد زیر را بنویس:
 ۱. یک خلاصه جذاب و کوتاه از این قسمت.
 ۲. یک کپشن انگیزشی و گیرا.
 ۳. حداقل ۶ هشتگ مرتبط با موضوع این قسمت.
-
 خروجی را به صورت یک متن منسجم و آماده برای پست اینستاگرام (بدون هیچ توضیح اضافه‌ای) برگردان."""
-    
     for attempt in range(3):
         try:
             r = GEMINI_CLIENT.models.generate_content(model="gemini-3.8-flash", contents=prompt)
             return r.text.strip()
         except Exception as e:
             err_str = str(e)
-            is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower()
-            is_server_busy = "503" in err_str or "UNAVAILABLE" in err_str
-            
-            if is_rate_limit:
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
                 print(f"  ⚠️ Gemini rate limit (attempt {attempt+1}). Waiting 90s...")
                 if attempt == 0:
                     telegram("⚠️ محدودیت Gemini فعال شد. منتظر می‌مونم...")
                 time.sleep(90)
-            elif is_server_busy:
+            elif "503" in err_str or "UNAVAILABLE" in err_str:
                 print(f"  ⚠️ Gemini server busy (attempt {attempt+1}). Waiting 30s...")
                 time.sleep(30)
             else:
                 print(f"  ⚠️ Gemini error (attempt {attempt+1}): {e}")
                 time.sleep(10)
-    
-    # بعد از همه تلاش‌ها، از کپشن پیش‌فرض استفاده کن و فلگ بزن
     _gemini_quota_exhausted = True
-    print("❌ Gemini quota exhausted. Using fallback for remaining parts.")
     telegram("⚠️ محدودیت Gemini تمام شد. از کپشن پیش‌فرض استفاده می‌شه.")
     return fallback
 
 
 # ═══════════════════════════════════════════════════
-# ساخت کاور اختصاصی برای هر قسمت
+# ابزار تصویر: نوشتن متن فارسی روی تصویر
 # ═══════════════════════════════════════════════════
-def create_part_thumbnail(video_path, part_num, output_path):
-    """استخراج فریم اول ویدیو و اضافه کردن شماره قسمت با فونت بزرگ"""
+def get_vazir_font(size):
+    """بارگذاری فونت وزیر"""
+    fonts_dir = os.path.expanduser("~/.fonts")
+    if os.path.isdir(fonts_dir):
+        for f in sorted(os.listdir(fonts_dir)):
+            if f.endswith(".ttf") and ("vazir" in f.lower() or "vazir" in f.lower()):
+                try:
+                    return ImageFont.truetype(os.path.join(fonts_dir, f), size)
+                except Exception:
+                    pass
+        for f in sorted(os.listdir(fonts_dir)):
+            if f.endswith(".ttf"):
+                try:
+                    return ImageFont.truetype(os.path.join(fonts_dir, f), size)
+                except Exception:
+                    pass
     try:
-        frame_path = str(TMP_DIR / f"frame_{part_num}.jpg")
+        return ImageFont.load_default()
+    except Exception:
+        return None
+
+
+def draw_persian_text(draw, text, font, center_x, center_y, fill=(255, 255, 0)):
+    """نوشتن متن فارسی درست (با reshape و bidi)"""
+    try:
+        shaped = arabic_reshaper.reshape(text)
+        text_ready = get_display(shaped)
+    except Exception:
+        text_ready = text
+    bbox = draw.textbbox((0, 0), text_ready, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    x = center_x - text_w // 2
+    y = center_y - text_h // 2
+    for dx in [-6, -3, 0, 3, 6]:
+        for dy in [-6, -3, 0, 3, 6]:
+            if dx == 0 and dy == 0:
+                continue
+            draw.text((x+dx, y+dy), text_ready, font=font, fill=(0, 0, 0))
+    draw.text((x, y), text_ready, font=font, fill=fill)
+
+
+# ═══════════════════════════════════════════════════
+# ساخت کاور مشترک ۱ ثانیه‌ای (از فریم اول ویدیوی اصلی)
+# ═══════════════════════════════════════════════════
+def create_shared_intro_frame(source_video, output_image):
+    """استخراج فریم اول ویدیوی اصلی به‌عنوان کاور مشترک"""
+    try:
         subprocess.run(
-            ["ffmpeg", "-y", "-i", video_path, "-vframes", "1", "-q:v", "2", frame_path],
+            ["ffmpeg", "-y", "-i", source_video, "-vframes", "1", "-q:v", "2", output_image],
             check=True, capture_output=True, timeout=120,
         )
-        
-        if not os.path.exists(frame_path):
-            print(f"⚠️ Could not extract frame for part {part_num}")
+        if not os.path.exists(output_image):
             return None
-        
-        img = Image.open(frame_path).convert("RGB")
-        
-        # اطمینان از ابعاد استاندارد (1080x1920)
+        return output_image
+    except Exception as e:
+        print(f"⚠️ Could not extract intro frame: {e}")
+        return None
+
+
+def create_part_thumbnail(shared_frame_path, part_num, total_parts, output_path):
+    """ساخت کاور اختصاصی هر قسمت با شماره «قسمت X از Y»"""
+    try:
+        if not shared_frame_path or not os.path.exists(shared_frame_path):
+            return None
+        img = Image.open(shared_frame_path).convert("RGB")
         if img.width != 1080 or img.height != 1920:
             img = img.resize((1080, 1920), Image.LANCZOS)
-        
         draw = ImageDraw.Draw(img)
-        
-        # پیدا کردن فونت وزیر
-        font_candidates = []
-        fonts_dir = os.path.expanduser("~/.fonts")
-        if os.path.isdir(fonts_dir):
-            for f in sorted(os.listdir(fonts_dir)):
-                if f.endswith(".ttf"):
-                    font_candidates.append(os.path.join(fonts_dir, f))
-        
-        font_path = font_candidates[0] if font_candidates else None
-        
-        # فونت خیلی بزرگ (۲۰٪ عرض تصویر)
-        font_size = int(img.width * 0.20)
-        if font_path:
-            font = ImageFont.truetype(font_path, font_size)
-        else:
-            font = ImageFont.load_default()
-        
-        # متن فارسی
-        text = f"قسمت {part_num}"
-        try:
-            shaped = arabic_reshaper.reshape(text)
-            text_ready = get_display(shaped)
-        except Exception:
-            text_ready = text
-        
-        # موقعیت مرکز
-        bbox = draw.textbbox((0, 0), text_ready, font=font)
-        text_w = bbox[2] - bbox[0]
-        text_h = bbox[3] - bbox[1]
-        x = (img.width - text_w) // 2
-        y = (img.height - text_h) // 2
-        
-        # سایه (خط دور)
-        for dx in [-6, -3, 0, 3, 6]:
-            for dy in [-6, -3, 0, 3, 6]:
-                if dx == 0 and dy == 0:
-                    continue
-                draw.text((x+dx, y+dy), text_ready, font=font, fill=(0, 0, 0))
-        
-        # متن اصلی زرد
-        draw.text((x, y), text_ready, font=font, fill=(255, 255, 0))
-        
+        font_size = int(img.width * 0.13)
+        font = get_vazir_font(font_size)
+        text = f"قسمت {part_num} از {total_parts}"
+        draw_persian_text(draw, text, font, img.width // 2, img.height // 2, fill=(255, 255, 0))
         img.save(output_path, "JPEG", quality=90)
-        print(f"  ✅ Thumbnail created for part {part_num}")
         return output_path
     except Exception as e:
-        print(f"  ⚠️ Thumbnail creation failed for part {part_num}: {e}")
+        print(f"⚠️ Thumbnail creation failed for part {part_num}: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════
+# ساخت Intro مشترک (۱ ثانیه از فریم اول + متن ثابت)
+# ═══════════════════════════════════════════════════
+def create_shared_intro_video(shared_frame_path, output_path, total_parts):
+    """ساخت یک ویدیوی ۱ ثانیه‌ای از فریم اول (با متن «۱ از ۴»)"""
+    try:
+        # ساخت یک تصویر با متن «۱ از ۴»
+        img = Image.open(shared_frame_path).convert("RGB")
+        if img.width != 1080 or img.height != 1920:
+            img = img.resize((1080, 1920), Image.LANCZOS)
+        draw = ImageDraw.Draw(img)
+        font = get_vazir_font(int(img.width * 0.13))
+        text = f"قسمت ۱ از {total_parts}"
+        draw_persian_text(draw, text, font, img.width // 2, img.height // 2, fill=(255, 255, 0))
+        intro_image = str(TMP_DIR / "intro_image.jpg")
+        img.save(intro_image, "JPEG", quality=90)
+
+        # ساخت ویدیوی ۱ ثانیه‌ای از تصویر
+        subprocess.run(
+            ["ffmpeg", "-y", "-loop", "1", "-i", intro_image,
+             "-t", str(INTRO_DURATION),
+             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+             "-pix_fmt", "yuv420p",
+             "-movflags", "+faststart",
+             output_path],
+            check=True, capture_output=True, timeout=300,
+        )
+        return output_path
+    except Exception as e:
+        print(f"⚠️ Could not create shared intro video: {e}")
         return None
 
 
@@ -443,7 +460,6 @@ def get_duration(video_path):
 def process_full_video(video_path, full_srt_path):
     print("Processing full video with subtitles and blur background...")
     output_path = str(TMP_DIR / "full_subtitled.mp4")
-
     filter_complex = (
         f"[0:v]split=2[orig1][orig2];"
         f"[orig1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:3[bg];"
@@ -453,23 +469,20 @@ def process_full_video(video_path, full_srt_path):
         f"PrimaryColour=&H0000FFFF,OutlineColour=&H80000000,BorderStyle=3,"
         f"BackColour=&H80000000,Outline=1,Shadow=0,MarginV=40,Alignment=2'[vout]"
     )
-
     subprocess.run(
-        ["ffmpeg", "-y",
-         "-i", video_path,
+        ["ffmpeg", "-y", "-i", video_path,
          "-filter_complex", filter_complex,
          "-map", "[vout]", "-map", "0:a:0?",
          "-c:v", "libx264", "-preset", "fast", "-crf", "23",
          "-c:a", "aac", "-b:a", "128k",
-         "-movflags", "+faststart",
-         output_path],
+         "-movflags", "+faststart", output_path],
         check=True, capture_output=True, timeout=1800,
     )
     print(f"  ✅ Full video processed: {output_path}")
     return output_path
 
 
-def split_final_video(processed_video_path, duration, video_title, translated_segments):
+def split_final_video(processed_video_path, duration, video_title, translated_segments, shared_intro_video):
     num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) + (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
     part_duration = duration / num_parts
     print(f"Splitting into {num_parts} parts (overlap {OVERLAP_SECONDS}s for parts 2+).")
@@ -483,44 +496,74 @@ def split_final_video(processed_video_path, duration, video_title, translated_se
             part_start = 0
         else:
             part_start = max(0, (i * part_duration) - OVERLAP_SECONDS)
-        
         part_end = min((i + 1) * part_duration, duration)
         part_len = part_end - part_start
-        out_path = str(TMP_DIR / f"part_{i+1}.mp4")
-        thumb_path = str(TMP_DIR / f"part_{i+1}_thumb.jpg")
+        raw_part_path = str(TMP_DIR / f"raw_part_{i+1}.mp4")
+        final_part_path = str(TMP_DIR / f"part_{i+1}.mp4")
 
         original_part_start = i * part_duration
-        original_part_end = part_end
-        part_text = " ".join([s["text"] for s in translated_segments if s["end"] > original_part_start and s["start"] < original_part_end])
-        
+        part_text = " ".join([s["text"] for s in translated_segments if s["end"] > original_part_start and s["start"] < part_end])
         print(f"  [Caption] Generating caption for part {i+1}/{num_parts}...")
         part_caption = generate_caption(video_title, part_text, i+1, num_parts)
         captions.append(part_caption)
 
+        # 1. برش خام
         subprocess.run(
-            ["ffmpeg", "-y",
-             "-ss", str(part_start),
-             "-i", processed_video_path,
+            ["ffmpeg", "-y", "-ss", str(part_start), "-i", processed_video_path,
              "-t", str(part_len),
              "-c:v", "libx264", "-preset", "fast", "-crf", "23",
              "-c:a", "aac", "-b:a", "128k",
-             "-movflags", "+faststart",
-             out_path],
+             "-movflags", "+faststart", raw_part_path],
             check=True, capture_output=True, timeout=900,
         )
-        outputs.append(out_path)
-        print(f"  ✅ Part {i+1}/{num_parts} built.")
+        print(f"  ✅ Raw part {i+1}/{num_parts} built.")
 
-        # ساخت کاور اختصاصی
-        print(f"  [Thumbnail] Creating cover for part {i+1}/{num_parts}...")
-        thumb = create_part_thumbnail(out_path, i+1, thumb_path)
+        # 2. چسباندن Intro مشترک به ابتدای قسمت (برای همه قسمت‌ها)
+        if shared_intro_video and os.path.exists(shared_intro_video):
+            concat_file = str(TMP_DIR / f"concat_{i+1}.txt")
+            with open(concat_file, "w") as f:
+                f.write(f"file '{shared_intro_video}'\n")
+                f.write(f"file '{raw_part_path}'\n")
+            # ساخت Intro با صدا (سکوت)
+            intro_with_audio = str(TMP_DIR / "intro_with_audio.mp4")
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", shared_intro_video,
+                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                 "-t", str(INTRO_DURATION),
+                 "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                 "-shortest", intro_with_audio],
+                check=True, capture_output=True, timeout=120,
+            )
+            with open(concat_file, "w") as f:
+                f.write(f"file '{intro_with_audio}'\n")
+                f.write(f"file '{raw_part_path}'\n")
+            subprocess.run(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
+                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                 "-c:a", "aac", "-b:a", "128k",
+                 "-movflags", "+faststart", final_part_path],
+                check=True, capture_output=True, timeout=900,
+            )
+            outputs.append(final_part_path)
+            print(f"  ✅ Part {i+1}/{num_parts} with shared intro.")
+        else:
+            outputs.append(raw_part_path)
+
+        # 3. ساخت کاور اختصاصی
+        frame_path = str(TMP_DIR / f"frame_{i+1}.jpg")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", outputs[-1], "-vframes", "1", "-q:v", "2", frame_path],
+            check=True, capture_output=True, timeout=120,
+        )
+        thumb_path = str(TMP_DIR / f"part_{i+1}_thumb.jpg")
+        thumb = create_part_thumbnail(frame_path, i+1, num_parts, thumb_path)
         thumbnails.append(thumb)
 
     return outputs, captions, thumbnails
 
 
 # ═══════════════════════════════════════════════════
-# آپلود در اینستاگرام (با کاور اختصاصی)
+# آپلود در اینستاگرام
 # ═══════════════════════════════════════════════════
 def upload_to_instagram(video_path, caption, thumbnail_path=None):
     cl = Client()
@@ -539,16 +582,12 @@ def main():
     print("=" * 60)
     print("Auto Instagram Poster - Started")
     print("=" * 60)
-
     if not all([INSTAGRAM_SESSIONID, GEMINI_API_KEY, TELEGRAM_BOT_TOKEN,
                 TELEGRAM_CHAT_ID, YOUTUBE_CHANNEL_URL]):
         print("❌ Missing env vars.")
         return
-
     state = load_state()
-
     if not state["queue"]:
-        print("First run: building queue...")
         videos = fetch_channel_videos(YOUTUBE_CHANNEL_URL)
         if not videos:
             telegram("❌ هیچ ویدیویی پیدا نشد.")
@@ -557,7 +596,6 @@ def main():
         state["queue_index"] = 0
         save_state(state)
         telegram(f"✅ صف ساخته شد: {len(videos)} ویدیو")
-
     if state["queue_index"] >= len(state["queue"]):
         telegram("✅ تمام ویدیوها پست شدن!")
         return
@@ -567,19 +605,31 @@ def main():
 
     try:
         video_path = download_video(video["id"])
+
+        # استخراج فریم اول از ویدیوی اصلی (کاور مشترک)
+        shared_frame = str(TMP_DIR / "shared_frame.jpg")
+        create_shared_intro_frame(video_path, shared_frame)
+
         audio_path = extract_audio(video_path)
         segments = transcribe(audio_path)
         translated = translate_segments(segments)
         translated = split_all_segments(translated)
-        
         full_srt_path = str(TMP_DIR / "full.srt")
         build_full_srt(translated, full_srt_path)
-        
         processed_video = process_full_video(video_path, full_srt_path)
-        
         duration = get_duration(processed_video)
+
+        # محاسبه تعداد قسمت‌ها
+        num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) + (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
+
+        # ساخت Intro مشترک ۱ ثانیه‌ای از فریم اول
+        shared_intro = None
+        if os.path.exists(shared_frame):
+            shared_intro_path = str(TMP_DIR / "shared_intro.mp4")
+            shared_intro = create_shared_intro_video(shared_frame, shared_intro_path, num_parts)
+
         parts, part_captions, part_thumbnails = split_final_video(
-            processed_video, duration, video["title"], translated
+            processed_video, duration, video["title"], translated, shared_intro
         )
 
         for i, (part, caption, thumb) in enumerate(zip(parts, part_captions, part_thumbnails), 1):
@@ -590,13 +640,11 @@ def main():
         state["stats"]["success"] += 1
         state["queue_index"] += 1
         save_state(state)
-
         telegram(
             f"✅ ویدیو پست شد: {video['title']}\n"
             f"📱 تعداد قطعات: {len(parts)}\n"
             f"📊 موفق: {state['stats']['success']}, ناموفق: {state['stats']['failed']}"
         )
-
     except Exception as e:
         print(f"❌ Error: {e}")
         state["stats"]["failed"] += 1
