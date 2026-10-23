@@ -37,6 +37,12 @@ OVERLAP_SECONDS = 3
 MAX_CHARS_PER_SUB = 40
 INTRO_DURATION = 1.0
 
+# 🌟 هشتگ‌های ثابت
+FIXED_HASHTAGS = """
+#انگیزشی #موفقیت #توسعه_فردی #روانشناسی #داستان_انگیزشی #هدف_گذاری
+#motivation #success #selfimprovement #mindset #inspiration #personaldevelopment
+"""
+
 GEMINI_CLIENT = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 _gemini_quota_exhausted = False
 
@@ -86,7 +92,7 @@ def fetch_channel_videos(channel_url):
     return videos
 
 # ═══════════════════════════════════════════════════
-# دانلود ویدیو
+# دانلود و پردازش
 # ═══════════════════════════════════════════════════
 def download_video(video_id):
     print(f"Downloading video {video_id} via WARP proxy + Deno + PO Token...")
@@ -123,9 +129,6 @@ def download_video(video_id):
             last_error = str(e)
     raise RuntimeError(f"All download attempts failed. Last error: {last_error}")
 
-# ═══════════════════════════════════════════════════
-# پردازش صدا و متن
-# ═══════════════════════════════════════════════════
 def extract_audio(video_path):
     audio_path = str(TMP_DIR / "audio.wav")
     subprocess.run(
@@ -232,28 +235,26 @@ def build_full_srt(segments, output_path):
             prev_end = rel_end
 
 # ═══════════════════════════════════════════════════
-# کپشن
+# کپشن (با هشتگ‌های ثابت)
 # ═══════════════════════════════════════════════════
 def generate_caption(video_title, part_text, part_num, total_parts):
     global _gemini_quota_exhausted
-    keywords = [w for w in re.findall(r'\b\w{4,}\b', part_text) if w.lower() not in ["this", "that", "with", "your", "from", "have"]]
-    hashtags = " ".join([f"#{k}" for k in list(set(keywords))[:5]])
-    fallback = f"🎬 {video_title}\n\nبخش {part_num} از {total_parts}:\n{part_text[:250]}...\n\n#انگیزشی #موفقیت #توسعه_فردی {hashtags}"
+    
+    fallback = f"🎬 {video_title}\n\nبخش {part_num} از {total_parts}:\n{part_text[:250]}...\n\n{FIXED_HASHTAGS}"
 
-    if not GEMINI_CLIENT or _gemini_quota_exhausted: return fallback
+    if not GEMINI_CLIENT or _gemini_quota_exhausted: 
+        return fallback
 
     prompt = f"""تو یک کپی‌رایتر حرفه‌ای برای اینستاگرام هستی.
 این متن، مربوط به قسمت {part_num} از {total_parts} یک ویدیو است:
 "{part_text}"
-بر اساس محتوای همین متن، دقیقاً موارد زیر را بنویس:
-۱. یک خلاصه جذاب و کوتاه از این قسمت.
-۲. یک کپشن انگیزشی و گیرا.
-۳. حداقل ۶ هشتگ مرتبط با موضوع این قسمت.
-خروجی را به صورت یک متن منسجم و آماده برای پست اینستاگرام (بدون هیچ توضیح اضافه‌ای) برگردان."""
+بر اساس محتوای همین متن، یک خلاصه جذاب و کوتاه و یک کپشن انگیزشی و گیرا بنویس.
+خروجی را به صورت یک متن منسجم و آماده برای پست اینستاگرام (بدون هیچ توضیح اضافه‌ای و بدون هشتگ) برگردان."""
 
     try:
         r = GEMINI_CLIENT.models.generate_content(model="gemini-3.8-flash", contents=prompt)
-        return r.text.strip()
+        gemini_text = r.text.strip()
+        return f"{gemini_text}\n\n{FIXED_HASHTAGS}"
     except Exception as e:
         err_str = str(e)
         if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower():
@@ -271,7 +272,7 @@ def generate_caption(video_title, part_text, part_num, total_parts):
         return fallback
 
 # ═══════════════════════════════════════════════════
-# ابزار تصویر: نوشتن متن فارسی روی تصویر
+# ابزار تصویر
 # ═══════════════════════════════════════════════════
 def get_vazir_font(size, bold=False):
     fonts_dir = os.path.expanduser("~/.fonts")
@@ -304,11 +305,7 @@ def draw_persian_text(draw, text, font, center_x, center_y, fill=(255, 255, 0), 
     except Exception as e:
         print(f"⚠️ Draw text error: {e}")
 
-# ═══════════════════════════════════════════════════
-# گرفتن کاور مشترک (هوشمند برای جلوگیری از سیاهی)
-# ═══════════════════════════════════════════════════
 def create_shared_intro_frame(source_video, output_image):
-    """استخراج فریم از ثانیه ۴ به بعد، و اگر سیاه بود جلوتر می‌رود"""
     try:
         for seek_time in ["4", "6", "8", "10"]:
             subprocess.run(
@@ -318,7 +315,7 @@ def create_shared_intro_frame(source_video, output_image):
             if os.path.exists(output_image):
                 img = Image.open(output_image).convert("RGB")
                 img_array = np.array(img)
-                if img_array.mean() > 20:  # اگر روشنایی کافی داشت
+                if img_array.mean() > 20: 
                     return output_image
                 else:
                     print(f"  ⚠️ Frame at {seek_time}s is too dark, trying next...")
@@ -327,9 +324,6 @@ def create_shared_intro_frame(source_video, output_image):
         print(f"⚠️ Could not extract intro frame: {e}")
         return None
 
-# ═══════════════════════════════════════════════════
-# ساخت کاور مشترک (بدون متن)
-# ═══════════════════════════════════════════════════
 def create_shared_intro_video(shared_frame_path, output_path, total_parts):
     try:
         img = Image.open(shared_frame_path).convert("RGB")
@@ -351,9 +345,6 @@ def create_shared_intro_video(shared_frame_path, output_path, total_parts):
         print(f"⚠️ Could not create shared intro video: {e}")
         return None
 
-# ═══════════════════════════════════════════════════
-# پردازش ویدیو
-# ═══════════════════════════════════════════════════
 def get_duration(video_path):
     r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path], capture_output=True, text=True)
     return float(r.stdout.strip())
@@ -378,12 +369,23 @@ def process_full_video(video_path, full_srt_path):
     )
     return output_path
 
+# ═══════════════════════════════════════════════════
+# پردازش نهایی (کاور مشترک)
+# ═══════════════════════════════════════════════════
 def split_final_video(processed_video_path, duration, video_title, translated_segments, shared_intro_video):
     num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) + (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
     part_duration = duration / num_parts
     print(f"Splitting into {num_parts} parts (overlap {OVERLAP_SECONDS}s for parts 2+).")
 
     outputs, captions, thumbnails = [], [], []
+    
+    # 🌟 گرفتن عکس مشترک از وسط ویدیوی اصلی
+    shared_thumbnail_bg = str(TMP_DIR / "shared_thumbnail_bg.jpg")
+    mid_video_time = duration / 2
+    subprocess.run(
+        ["ffmpeg", "-y", "-ss", str(mid_video_time), "-i", processed_video_path, "-vframes", "1", "-q:v", "2", shared_thumbnail_bg],
+        check=True, capture_output=True, timeout=120,
+    )
 
     for i in range(num_parts):
         part_start = 0 if i == 0 else max(0, (i * part_duration) - OVERLAP_SECONDS)
@@ -422,30 +424,25 @@ def split_final_video(processed_video_path, duration, video_title, translated_se
         else:
             outputs.append(raw_part_path)
 
-        # کاور رو از فریم دوم (بعد از ۱ ثانیه) می‌گیریم تا متن قسمت ۱ توش نیفته
-        frame_path = str(TMP_DIR / f"frame_{i+1}.jpg")
-        subprocess.run(
-            ["ffmpeg", "-y", "-ss", "1.5", "-i", outputs[-1], "-vframes", "1", "-q:v", "2", frame_path],
-            check=True, capture_output=True, timeout=120,
-        )
-        
-        # ساخت کاور با نوار مشکی و متن درشت
+        # 🌟 ساخت کاور از عکس مشترک و نوشتن متن اختصاصی هر قسمت
         thumb_path = str(TMP_DIR / f"part_{i+1}_thumb.jpg")
         try:
-            img = Image.open(frame_path).convert("RGB")
-            if img.width != 1080 or img.height != 1920: img = img.resize((1080, 1920), Image.LANCZOS)
+            img = Image.open(shared_thumbnail_bg).convert("RGB")
+            if img.width != 1080 or img.height != 1920: 
+                img = img.resize((1080, 1920), Image.LANCZOS)
             
             overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
             overlay_draw = ImageDraw.Draw(overlay)
-            bar_y1 = img.height // 2 - 100
-            bar_y2 = img.height // 2 + 100
+            bar_y1 = int(img.height * 0.15)
+            bar_y2 = int(img.height * 0.30)
             overlay_draw.rectangle([0, bar_y1, img.width, bar_y2], fill=(0, 0, 0, 180))
             img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
-            draw = ImageDraw.Draw(img)
             
+            draw = ImageDraw.Draw(img)
             font = get_vazir_font(int(img.width * 0.15))
             text = f"قسمت {i+1} از {num_parts}"
-            draw_persian_text(draw, text, font, img.width // 2, img.height // 2, fill=(255, 215, 0), stroke_width=6)
+            
+            draw_persian_text(draw, text, font, img.width // 2, (bar_y1 + bar_y2) // 2, fill=(255, 215, 0), stroke_width=6)
             img.save(thumb_path, "JPEG", quality=95)
             thumbnails.append(thumb_path)
         except Exception as e:
