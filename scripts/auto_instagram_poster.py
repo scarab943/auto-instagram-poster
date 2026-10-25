@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import shutil
 import re
+import textwrap
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -39,9 +40,9 @@ MAX_CHARS_PER_SUB = 40
 FIXED_HASHTAGS_FA = "#انگیزشی #توسعه_فردی #داستان_انگیزشی #روانشناسی"
 FIXED_HASHTAGS_EN = "#motivation #success #selfimprovement #mindset"
 
-# 🌟 مدیریت چند اکانت Gemini
+# 🌟 مدیریت اکانت‌های Gemini (۴ جدید + ۱ قدیمی)
 GEMINI_CLIENTS = []
-for i in range(1, 4):
+for i in range(1, 5):
     key = os.getenv(f"GEMINI_KEY_{i}")
     if key: GEMINI_CLIENTS.append(genai.Client(api_key=key))
 if not GEMINI_CLIENTS and os.getenv("GEMINI_API_KEY"):
@@ -135,9 +136,6 @@ def translate_text(text):
         time.sleep(3)
     return text
 
-def translate_title(title):
-    return translate_text(title)
-
 def merge_segments(segments, max_chars=150):
     merged, current = [], None
     for seg in segments:
@@ -180,9 +178,9 @@ def build_full_srt(segments, output_path):
             prev_end = seg["end"]
 
 # ═══════════════════════════════════════════════════
-# هوش مصنوعی (چرخش، درک ویدیو، JSON)
+# هوش مصنوعی (کپشن و هشتگ)
 # ═══════════════════════════════════════════════════
-def generate_caption(video_title_fa, part_text, part_num, total_parts):
+def generate_caption(video_title, part_text, part_num, total_parts):
     fallback = {
         "summary": f"بخش {part_num} از {total_parts}",
         "hashtags_fa": "", "hashtags_en": ""
@@ -190,9 +188,9 @@ def generate_caption(video_title_fa, part_text, part_num, total_parts):
     if not GEMINI_CLIENTS: return fallback
 
     prompt = f"""تو یک کپی‌رایتر حرفه‌ای اینستاگرام هستی.
-عنوان ویدیو: "{video_title_fa}"
+عنوان ویدیو: "{video_title}"
 متن این قسمت: "{part_text}"
-۱. یک خلاصه بسیار کوتاه (فقط ۱ یا ۲ خط) و جذاب از این قسمت بنویس.
+۱. یک خلاصه بسیار کوتاه (فقط ۱ یا ۲ خط) و جذاب از این قسمت به فارسی بنویس.
 ۲. ۴ هشتگ تخصصی فارسی که به موضوع این داستان می‌خورد.
 ۳. ۴ هشتگ تخصصی انگلیسی که به موضوع این داستان می‌خورد.
 خروجی را دقیقاً در قالب JSON با کلیدهای "summary"، "hashtags_fa" و "hashtags_en" برگردان."""
@@ -218,46 +216,8 @@ def generate_caption(video_title_fa, part_text, part_num, total_parts):
             time.sleep(1)
     return fallback
 
-def find_hero_frame(video_path, temp_dir):
-    """۵ فریم از ویدیو می‌گیرد و از Gemini می‌پرسد کدام قهرمان است"""
-    duration = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path], capture_output=True, text=True).stdout.strip())
-    
-    # استخراج ۵ فریم
-    frames = []
-    for pct in [0.1, 0.3, 0.5, 0.7, 0.9]:
-        frame_path = str(temp_dir / f"hero_frame_{pct}.jpg")
-        subprocess.run(["ffmpeg", "-y", "-ss", str(duration * pct), "-i", video_path, "-vframes", "1", "-q:v", "2", frame_path], check=True, capture_output=True)
-        if os.path.exists(frame_path): frames.append(frame_path)
-
-    if not frames or not GEMINI_CLIENTS: return frames[0] if frames else None
-
-    # ارسال به Gemini
-    try:
-        client = GEMINI_CLIENTS[0] # از اولین کلید برای این کار استفاده می‌کنیم
-        prompt = "این ۵ تصویر از یک ویدیو هستند. کدام یک قهرمان اصلی (کاراکتر اصلی) داستان را واضح‌تر و بهتر نشان می‌دهد؟ فقط شماره آن را (۱ تا ۵) بنویس."
-        
-        contents = []
-        for i, f in enumerate(frames):
-            contents.append(f"عکس {i+1}:")
-            contents.append(genai.types.Part.from_bytes(data=Path(f).read_bytes(), mime_type="image/jpeg"))
-        contents.append(prompt)
-
-        response = client.models.generate_content(model="gemini-3.8-flash", contents=contents)
-        text = response.text.strip()
-        
-        # استخراج عدد
-        match = re.search(r'[1-5]', text)
-        if match:
-            idx = int(match.group()) - 1
-            print(f"  🤖 Gemini selected frame {idx+1} as Hero.")
-            return frames[idx]
-    except Exception as e:
-        print(f"  ⚠️ Vision error: {e}. Using middle frame.")
-    
-    return frames[2] # پیش‌فرض فریم وسط
-
 # ═══════════════════════════════════════════════════
-# پردازش ویدیو
+# پردازش ویدیو (زیرنویس دقیقاً مثل نسخه سالم)
 # ═══════════════════════════════════════════════════
 def process_full_video(video_path, full_srt_path):
     print("Processing full video with subtitles and blur background...")
@@ -274,6 +234,9 @@ def process_full_video(video_path, full_srt_path):
     subprocess.run(["ffmpeg", "-y", "-i", video_path, "-filter_complex", filter_complex, "-map", "[vout]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output_path], check=True, capture_output=True, timeout=1800)
     return output_path
 
+# ═══════════════════════════════════════════════════
+# ابزار تصویر
+# ═══════════════════════════════════════════════════
 def get_vazir_font(size):
     fonts_dir = os.path.expanduser("~/.fonts")
     if os.path.isdir(fonts_dir):
@@ -283,16 +246,16 @@ def get_vazir_font(size):
                 except: pass
     return ImageFont.load_default()
 
-def draw_persian_text(draw, text, font, center_x, center_y, fill=(255, 255, 0), stroke_width=4):
+def draw_persian_text(draw, text, font, center_x, center_y, fill=(255, 215, 0), stroke_width=4):
     try:
         shaped = arabic_reshaper.reshape(text)
         bbox = draw.textbbox((0, 0), shaped, font=font, direction="rtl", language="fa")
         draw.text((center_x - (bbox[2] - bbox[0]) // 2, center_y - (bbox[3] - bbox[1]) // 2), shaped, font=font, fill=fill, direction="rtl", language="fa", stroke_width=stroke_width, stroke_fill=(0, 0, 0))
     except: pass
 
-def create_shared_intro_video(hero_frame_path, output_path):
+def create_shared_intro_video(shared_frame_path, output_path):
     try:
-        img = Image.open(hero_frame_path).convert("RGB").resize((1080, 1920), Image.LANCZOS)
+        img = Image.open(shared_frame_path).convert("RGB").resize((1080, 1920), Image.LANCZOS)
         intro_image = str(TMP_DIR / "intro_image.jpg")
         img.save(intro_image, "JPEG", quality=90)
         subprocess.run(["ffmpeg", "-y", "-loop", "1", "-i", intro_image, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-t", "1.0", "-r", "30", "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-shortest", "-movflags", "+faststart", output_path], check=True, capture_output=True, timeout=300)
@@ -300,14 +263,14 @@ def create_shared_intro_video(hero_frame_path, output_path):
     except: return None
 
 # ═══════════════════════════════════════════════════
-# پردازش نهایی (برش، کاور، کپشن)
+# پردازش نهایی (کاور وسط‌چین + عنوان انگلیسی)
 # ═══════════════════════════════════════════════════
-def split_final_video(processed_video_path, duration, video_title_fa, translated_segments, shared_intro_video):
+def split_final_video(processed_video_path, duration, video_title_en, video_title_fa, translated_segments, shared_intro_video):
     num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) + (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
     part_duration = duration / num_parts
     outputs, captions, thumbnails = [], [], []
     
-    # گرفتن عکس پایه مشترک برای کاورها از ویدیوی نهایی
+    # گرفتن عکس پایه از وسط ویدیو
     shared_thumbnail_bg = str(TMP_DIR / "shared_thumbnail_bg.jpg")
     subprocess.run(["ffmpeg", "-y", "-ss", str(duration / 2), "-i", processed_video_path, "-vframes", "1", "-q:v", "2", shared_thumbnail_bg], check=True, capture_output=True)
 
@@ -324,7 +287,7 @@ def split_final_video(processed_video_path, duration, video_title_fa, translated
         print(f"  [Caption] Generating for part {i+1}/{num_parts}...")
         caption_data = generate_caption(video_title_fa, part_text, i+1, num_parts)
         
-        # 🌟 ساخت کپشن نهایی (عنوان بالای متن، سپس خلاصه، سپس هشتگ‌ها)
+        # کپشن نهایی
         final_caption = f"🎬 **{video_title_fa}**\n\n"
         final_caption += f"{caption_data['summary']}\n\n"
         final_caption += f"{FIXED_HASHTAGS_FA} {caption_data.get('hashtags_fa', '')}\n"
@@ -344,25 +307,34 @@ def split_final_video(processed_video_path, duration, video_title_fa, translated
         else:
             outputs.append(raw_part_path)
 
-        # 🌟 ساخت کاور حرفه‌ای با عنوان و شماره قسمت
+        # 🌟 ساخت کاور (همه چیز وسط تصویر)
         thumb_path = str(TMP_DIR / f"part_{i+1}_thumb.jpg")
         try:
             img = Image.open(shared_thumbnail_bg).convert("RGB").resize((1080, 1920), Image.LANCZOS)
-            draw = ImageDraw.Draw(img)
             
-            # نوار مشکی بالای تصویر (برای متن)
+            # کادر مشکی وسط تصویر
             overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
-            ImageDraw.Draw(overlay).rectangle([0, int(img.height*0.10), img.width, int(img.height*0.30)], fill=(0, 0, 0, 190))
+            box_top = int(img.height * 0.35)
+            box_bottom = int(img.height * 0.65)
+            ImageDraw.Draw(overlay).rectangle([0, box_top, img.width, box_bottom], fill=(0, 0, 0, 200))
             img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
             draw = ImageDraw.Draw(img)
 
-            # ۱. نوشتن عنوان ویدیو (بالاتر)
-            font_title = get_vazir_font(int(img.width * 0.07))
-            draw_persian_text(draw, video_title_fa, font_title, img.width // 2, int(img.height * 0.15), fill=(255, 255, 255), stroke_width=3)
+            # ۱. عنوان انگلیسی (با فونت انگلیسی و شکستن خطوط طولانی)
+            font_en = get_vazir_font(int(img.width * 0.06)) # فونت وزیر با حروف انگلیسی هم کار می‌کند
+            wrapped_title = textwrap.fill(video_title_en, width=25) # شکستن خطوط طولانی
+            bbox_en = draw.multiline_textbbox((0, 0), wrapped_title, font=font_en, align="center")
+            w_en, h_en = bbox_en[2] - bbox_en[0], bbox_en[3] - bbox_en[1]
             
-            # ۲. نوشتن شماره قسمت (پایین‌تر)
-            font_part = get_vazir_font(int(img.width * 0.12))
-            draw_persian_text(draw, f"قسمت {i+1} از {num_parts}", font_part, img.width // 2, int(img.height * 0.24), fill=(255, 215, 0), stroke_width=5)
+            # قرار دادن عنوان در بالای کادر مشکی
+            text_y_en = box_top + 50
+            draw.multiline_text(((img.width - w_en) // 2, text_y_en), wrapped_title, font=font_en, fill=(255, 255, 255), align="center", stroke_width=3, stroke_fill=(0, 0, 0))
+
+            # ۲. متن قسمت (پایین عنوان)
+            font_part = get_vazir_font(int(img.width * 0.1))
+            text_part = f"قسمت {i+1} از {num_parts}"
+            text_y_part = text_y_en + h_en + 60 # کمی پایین‌تر از عنوان
+            draw_persian_text(draw, text_part, font_part, img.width // 2, text_y_part, fill=(255, 215, 0), stroke_width=5)
             
             img.save(thumb_path, "JPEG", quality=95)
             thumbnails.append(thumb_path)
@@ -398,15 +370,20 @@ def main():
     print(f"Processing: {video['id']} - {video['title']}")
 
     try:
-        # ترجمه عنوان ویدیو
-        video_title_fa = translate_title(video["title"])
-        print(f"Translated Title: {video_title_fa}")
+        video_title_en = video["title"] # عنوان اصلی انگلیسی
+        video_title_fa = translate_text(video_title_en) # ترجمه برای کپشن
+        print(f"English Title: {video_title_en}")
+        print(f"Persian Title: {video_title_fa}")
 
         video_path = download_video(video["id"])
         
-        # پیدا کردن بهترین فریم از قهرمان داستان
-        print("Finding Hero Frame...")
-        hero_frame = find_hero_frame(video_path, TMP_DIR)
+        # استخراج فریم مشترک (از ثانیه ۴ به بعد برای جلوگیری از سیاهی)
+        shared_frame = str(TMP_DIR / "shared_frame.jpg")
+        for seek_time in ["4", "6", "8", "10"]:
+            subprocess.run(["ffmpeg", "-y", "-ss", seek_time, "-i", video_path, "-vframes", "1", "-q:v", "2", shared_frame], check=True, capture_output=True)
+            if os.path.exists(shared_frame):
+                img = Image.open(shared_frame).convert("RGB")
+                if np.array(img).mean() > 20: break
 
         audio_path = extract_audio(video_path)
         translated = translate_segments(transcribe(audio_path))
@@ -417,10 +394,10 @@ def main():
         duration = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", processed_video], capture_output=True, text=True).stdout.strip())
 
         shared_intro = None
-        if hero_frame and os.path.exists(hero_frame):
-            shared_intro = create_shared_intro_video(hero_frame, str(TMP_DIR / "shared_intro.mp4"))
+        if os.path.exists(shared_frame):
+            shared_intro = create_shared_intro_video(shared_frame, str(TMP_DIR / "shared_intro.mp4"))
 
-        parts, captions, thumbnails = split_final_video(processed_video, duration, video_title_fa, translated, shared_intro)
+        parts, captions, thumbnails = split_final_video(processed_video, duration, video_title_en, video_title_fa, translated, shared_intro)
 
         for i, (part, caption, thumb) in enumerate(zip(parts, captions, thumbnails), 1):
             try:
