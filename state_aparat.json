@@ -1,0 +1,12 @@
+{
+  "queue": [],
+  "queue_index": 0,
+  "current_part": 1,
+  "total_parts": 0,
+  "video_processed": false,
+  "processed_data": {},
+  "stats": {
+    "success": 0,
+    "failed": 0
+  }
+}
