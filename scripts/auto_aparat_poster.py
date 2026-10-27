@@ -16,6 +16,7 @@ from faster_whisper import WhisperModel
 from google import genai
 
 import arabic_reshaper
+from bidi.algorithm import get_display
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import numpy as np
 
@@ -61,8 +62,8 @@ def load_state():
         "queue_index": 0,
         "current_part": 1,
         "total_parts": 0,
-        "video_processed": False,  # آیا ویدیوی فعلی پردازش (دانلود+زیرنویس+کاور) شده؟
-        "processed_data": {},      # داده‌های ذخیره‌شده ویدیوی پردازش‌شده
+        "video_processed": False,
+        "processed_data": {},
         "stats": {"success": 0, "failed": 0}
     }
     if STATE_FILE.exists():
@@ -269,7 +270,6 @@ def build_full_srt(segments, output_path):
             prev_end = seg["end"]
 
 def build_part_srt(segments, part_start, part_end, output_path):
-    """زیرنویس مخصوص یک قسمت را می‌سازد (زمان‌ها نسبت به شروع قسمت)."""
     with open(output_path, "w", encoding="utf-8") as f:
         idx = 1
         for seg in segments:
@@ -283,13 +283,13 @@ def build_part_srt(segments, part_start, part_end, output_path):
             idx += 1
 
 # ═══════════════════════════════════════════════════
-# هوش مصنوعی (کپشن، هشتگ، توصیف قهرمان)
+# هوش مصنوعی
 # ═══════════════════════════════════════════════════
 def generate_caption_and_hashtags(video_title, part_text, part_num, total_parts):
     fallback = {
         "summary": f"قسمت {part_num} از {total_parts}",
         "hashtags": "",
-        "hero_description": "a determined person, cinematic lighting, inspiring atmosphere, vertical composition"
+        "hero_description": "a determined person, cinematic lighting, inspiring atmosphere"
     }
     if not GEMINI_CLIENTS:
         return fallback
@@ -331,7 +331,7 @@ def generate_caption_and_hashtags(video_title, part_text, part_num, total_parts)
     return fallback
 
 # ═══════════════════════════════════════════════════
-# کاور (۱۶:۹ افقی برای آپارات)
+# کاور (۱۶:۹ افقی)
 # ═══════════════════════════════════════════════════
 def download_ai_image(prompt, output_path, width=1920, height=1080):
     try:
@@ -360,13 +360,10 @@ def get_font_path():
     return vazir_bold
 
 def create_aparat_cover(hero_description, video_title_fa, part_num, total_parts, output_path):
-    """کاور ۱۶:۹ افقی با قهرمان، پس‌زمینه سینمایی، عنوان و شماره قسمت."""
     try:
-        # ۱. ساخت تصویر قهرمان با AI
         hero_img_path = str(TMP_DIR / "hero_base.jpg")
         hero_prompt = f"cinematic portrait of {hero_description}, inspirational atmosphere, dramatic lighting, high quality, photorealistic"
         if not download_ai_image(hero_prompt, hero_img_path, 1920, 1080):
-            # fallback: پس‌زمینه ساده
             hero_img_path = str(TMP_DIR / "hero_fallback.jpg")
             subprocess.run(
                 ["ffmpeg", "-f", "lavfi", "-i", "color=c=0x1a1a2e:s=1920x1080:d=1",
@@ -376,7 +373,6 @@ def create_aparat_cover(hero_description, video_title_fa, part_num, total_parts,
 
         base = Image.open(hero_img_path).convert("RGB").resize((1920, 1080), Image.LANCZOS)
 
-        # ۲. گرادیان تیره از پایین
         overlay = Image.new('RGBA', base.size, (0, 0, 0, 0))
         draw_overlay = ImageDraw.Draw(overlay)
         for y in range(int(base.height * 0.45), base.height):
@@ -386,7 +382,6 @@ def create_aparat_cover(hero_description, video_title_fa, part_num, total_parts,
         base = Image.alpha_composite(base.convert('RGBA'), overlay).convert('RGB')
         draw = ImageDraw.Draw(base)
 
-        # ۳. فونت
         vazir_bold = get_font_path()
         if vazir_bold:
             font_title = ImageFont.truetype(vazir_bold, 90, layout_engine=ImageFont.Layout.RAQM)
@@ -395,15 +390,11 @@ def create_aparat_cover(hero_description, video_title_fa, part_num, total_parts,
             font_title = ImageFont.load_default()
             font_badge = ImageFont.load_default()
 
-        # ۴. متن فارسی (reshape + bidi)
         try:
-            import arabic_reshaper
-            from bidi.algorithm import get_display
             title_display = get_display(arabic_reshaper.reshape(video_title_fa))
         except:
             title_display = video_title_fa
 
-        # ۵. عنوان (چند خطی)
         wrapped = textwrap.fill(title_display, width=30)
         try:
             bbox = draw.multiline_textbbox((0, 0), wrapped, font=font_title, align="center", spacing=15)
@@ -414,13 +405,11 @@ def create_aparat_cover(hero_description, video_title_fa, part_num, total_parts,
         text_x = (base.width - text_w) // 2
         text_y = int(base.height * 0.55)
 
-        # سایه متن
         draw.multiline_text((text_x + 6, text_y + 6), wrapped, font=font_title,
                             fill=(0, 0, 0, 220), align="center", spacing=15)
         draw.multiline_text((text_x, text_y), wrapped, font=font_title,
                             fill=(255, 255, 255), align="center", spacing=15)
 
-        # ۶. بج شماره قسمت
         badge_text = f"قسمت {part_num} از {total_parts}"
         try:
             badge_display = get_display(arabic_reshaper.reshape(badge_text))
@@ -446,7 +435,7 @@ def create_aparat_cover(hero_description, video_title_fa, part_num, total_parts,
         return False
 
 # ═══════════════════════════════════════════════════
-# پردازش ویدیو (زیرنویس روی ویدیوی کامل - فقط یک بار)
+# پردازش ویدیو
 # ═══════════════════════════════════════════════════
 def process_full_video_with_subs(video_path, full_srt_path):
     print("Processing full video with burned-in subtitles...")
@@ -468,7 +457,6 @@ def process_full_video_with_subs(video_path, full_srt_path):
     return output_path
 
 def cut_video_part(processed_video, part_start, part_end, output_path):
-    """یک قسمت ۲ دقیقه‌ای را برش می‌دهد."""
     duration = part_end - part_start
     subprocess.run(
         ["ffmpeg", "-y", "-ss", str(part_start), "-i", processed_video,
@@ -479,12 +467,12 @@ def cut_video_part(processed_video, part_start, part_end, output_path):
     return output_path
 
 # ═══════════════════════════════════════════════════
-# آپلود به آپارات
+# آپلود به آپارات (اصلاح شده)
 # ═══════════════════════════════════════════════════
 def upload_to_aparat(video_path, title, description, tags, subtitle_path, thumbnail_path):
-    from AparatUploader import AparatUploader
+    # ایمپورت صحیح بر اساس ساختار مخزن
+    from AparatUploader.aparat import AparatUploader
 
-    # نوشتن کوکی در فایل موقت
     cookies_path = str(TMP_DIR / "aparat_cookies.txt")
     with open(cookies_path, "w", encoding="utf-8") as f:
         f.write(APARAT_COOKIES)
@@ -496,10 +484,10 @@ def upload_to_aparat(video_path, title, description, tags, subtitle_path, thumbn
         title=title,
         description=description,
         tags=tags,
-        category="3",  # تحصیلات و یادگیری
+        category="3",
         video_subtitle_file=subtitle_path,
         thumbnail=thumbnail_path,
-        video_pass='0',  # انتشار فوری
+        video_pass='0',
     )
     return result
 
@@ -513,7 +501,6 @@ def main():
 
     state = load_state()
 
-    # اگر صف خالی است، از کانال یوتیوب پر کن
     if not state["queue"]:
         videos = fetch_channel_videos(YOUTUBE_CHANNEL_URL)
         if not videos:
@@ -546,14 +533,11 @@ def main():
             translated = translate_segments(transcribe(audio_path))
             translated = split_all_segments(translated)
 
-            # زیرنویس کامل
             full_srt_path = str(TMP_DIR / "full.srt")
             build_full_srt(translated, full_srt_path)
 
-            # پردازش ویدیو با زیرنویس
             processed_video = process_full_video_with_subs(video_path, full_srt_path)
 
-            # محاسبه مدت زمان و تعداد قسمت‌ها
             duration = float(subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=noprint_wrappers=1:nokey=1", processed_video],
@@ -563,7 +547,6 @@ def main():
             num_parts = max(1, int(duration // MAX_SEGMENT_DURATION) +
                            (1 if duration % MAX_SEGMENT_DURATION > 0 else 0))
 
-            # ذخیره داده‌های پردازش‌شده در state
             state["video_processed"] = True
             state["total_parts"] = num_parts
             state["current_part"] = 1
@@ -596,25 +579,20 @@ def main():
 
         print(f"✂️ Cutting part {target_part}/{num_parts} ({part_start:.1f}s → {part_end:.1f}s)...")
 
-        # برش ویدیو
         part_video_path = str(TMP_DIR / f"part_{target_part}.mp4")
         cut_video_part(processed_video, part_start, part_end, part_video_path)
 
-        # برش زیرنویس مخصوص این قسمت
         part_srt_path = str(TMP_DIR / f"part_{target_part}.srt")
         build_part_srt(translated, part_start, part_end, part_srt_path)
 
-        # متن این قسمت برای کپشن
         part_text = " ".join([
             s["text"] for s in translated
             if s["end"] > part_start and s["start"] < part_end
         ])
 
-        # تولید کپشن + هشتگ + توصیف قهرمان
         print(f"🤖 Generating caption & hero description...")
         meta = generate_caption_and_hashtags(video_title_fa, part_text, target_part, num_parts)
 
-        # ساخت کاور ۱۶:۹
         print(f"🎨 Creating cover...")
         cover_path = str(TMP_DIR / f"cover_{target_part}.jpg")
         create_aparat_cover(
@@ -625,7 +603,6 @@ def main():
             cover_path
         )
 
-        # کپشن نهایی
         description = (
             f"🎬 {video_title_fa}\n\n"
             f"{meta['summary']}\n\n"
@@ -633,13 +610,9 @@ def main():
             f"{meta.get('hashtags', '')}"
         )
 
-        # تگ‌ها (حداقل ۳ تگ با خط تیره)
         tags = "آموزش_زبان-داستان_انگلیسی-انگیزشی-توسعه_فردی"
-
-        # عنوان
         title = f"{video_title_fa} - قسمت {target_part} از {num_parts}"
 
-        # آپلود
         print(f"📤 Uploading part {target_part} to Aparat...")
         result = upload_to_aparat(
             video_path=part_video_path,
@@ -651,12 +624,10 @@ def main():
         )
         print(f"✅ Uploaded: {result}")
 
-        # ─── مرحله ۳: به‌روزرسانی state ───
         state["stats"]["success"] += 1
         state["current_part"] += 1
 
         if state["current_part"] > state["total_parts"]:
-            # ویدیو تمام شد، برو بعدی
             state["queue_index"] += 1
             state["current_part"] = 1
             state["total_parts"] = 0
