@@ -467,10 +467,10 @@ def cut_video_part(processed_video, part_start, part_end, output_path):
     return output_path
 
 # ═══════════════════════════════════════════════════
-# آپلود به آپارات (اصلاح شده)
+# آپلود به آپارات (ایمپورت اصلاح شد)
 # ═══════════════════════════════════════════════════
 def upload_to_aparat(video_path, title, description, tags, subtitle_path, thumbnail_path):
-    # ایمپورت صحیح بر اساس ساختار مخزن
+    # ایمپورت صحیح بر اساس README رسمی کتابخانه
     from AparatUploader.aparat import AparatUploader
 
     cookies_path = str(TMP_DIR / "aparat_cookies.txt")
@@ -629,23 +629,4 @@ def main():
 
         if state["current_part"] > state["total_parts"]:
             state["queue_index"] += 1
-            state["current_part"] = 1
-            state["total_parts"] = 0
-            state["video_processed"] = False
-            state["processed_data"] = {}
-
-        save_state(state)
-        telegram(f"✅ قسمت {target_part} از {num_parts} آپلود شد: {video_title_fa}")
-
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-        state["stats"]["failed"] += 1
-        save_state(state)
-        telegram(f"❌ خطا در قسمت {target_part}:\n{str(e)[:300]}")
-    finally:
-        shutil.rmtree(TMP_DIR, ignore_errors=True)
-
-if __name__ == "__main__":
-    main()
+            state["current_part
