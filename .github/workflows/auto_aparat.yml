@@ -39,13 +39,15 @@ jobs:
       - name: Install Python deps
         run: |
           pip install -r requirements.txt
-          # حذف instagrapi لازم نیست چون فقط نصب نمیشه
+          # حذف instagrapi برای جلوگیری از تداخل
           pip uninstall -y instagrapi 2>/dev/null || true
+          # نصب پیش‌نیازهای AparatUploader
+          pip install beautifulsoup4 pycryptodome
 
       - name: Install AparatUploader
         run: |
           git clone --depth 1 https://github.com/karim23657/AparatUploader /tmp/AparatUploader
-          pip install -e /tmp/AparatUploader
+          echo "PYTHONPATH=/tmp/AparatUploader" >> $GITHUB_ENV
 
       - name: Setup BGutil PO Token Provider
         run: |
