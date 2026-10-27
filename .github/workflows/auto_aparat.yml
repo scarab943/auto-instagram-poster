@@ -44,7 +44,8 @@ jobs:
 
       - name: Install AparatUploader
         run: |
-          pip install git+https://github.com/karim23657/AparatUploader.git
+          git clone --depth 1 https://github.com/karim23657/AparatUploader /tmp/AparatUploader
+          echo "PYTHONPATH=/tmp/AparatUploader" >> $GITHUB_ENV
 
       - name: Setup BGutil PO Token Provider
         run: |
