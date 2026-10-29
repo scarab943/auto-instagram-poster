@@ -343,9 +343,9 @@
   ],
   "queue_index": 24,
   "stats": {
-    "success": 30,
+    "success": 32,
     "failed": 2
   },
-  "current_part": 1,
-  "total_parts": 0
+  "current_part": 3,
+  "total_parts": 4
 }
