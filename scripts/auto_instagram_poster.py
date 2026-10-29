@@ -157,7 +157,6 @@ def merge_segments(segments, max_chars=150):
     if current: merged.append(current)
     return merged
 
-# 🌟 تابع اصلاح‌شده برای شکستن دقیق کلمات (جلوگیری از روی هم افتادن)
 def split_long_segment(seg):
     text = seg["text"].replace('\n', ' ').strip()
     if len(text) <= MAX_CHARS_PER_SUB: return [seg]
@@ -282,47 +281,35 @@ def get_best_video_frame(video_path, temp_dir):
                 best_frame_path = frame_path
     return best_frame_path
 
-def get_ai_cover_prompt(video_title):
-    prompt = f"Based on this video title: '{video_title}', write a short, highly descriptive English prompt (max 15 words) for an AI image generator to create a cinematic, motivational background for a vertical video (9:16). Focus on mood, lighting, and main subject. Return ONLY the prompt text."
-    if GEMINI_CLIENTS:
-        for client in GEMINI_CLIENTS:
-            try:
-                response = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
-                return response.text.strip().replace('"', '')
-            except: pass
-    return "cinematic, inspirational, glowing horizon, dramatic lighting, high resolution, vertical format"
-
-def download_ai_image(prompt, output_path):
+# 🌟 کاور جدید: عکس از خود ویدیو + متن بزرگ در وسط
+def create_masterpiece_cover(raw_frame_path, video_title_en, part_num, total_parts, output_path):
     try:
-        encoded_prompt = quote(prompt)
-        url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1080&height=1920&nologo=true&enhance=true&seed={random.randint(1,10000)}"
-        r = requests.get(url, timeout=45)
-        if r.status_code == 200:
-            with open(output_path, 'wb') as f: f.write(r.content)
-            return True
-    except Exception as e:
-        print(f"  ⚠️ AI Error: {e}")
-    return False
-
-def create_masterpiece_cover(base_image_path, video_title_en, part_num, total_parts, output_path):
-    try:
-        img = Image.open(base_image_path).convert("RGB").resize((1080, 1920), Image.LANCZOS)
-        overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
-        draw_overlay = ImageDraw.Draw(overlay)
+        # 1. باز کردن عکس اصلی
+        bg = Image.open(raw_frame_path).convert("RGB")
         
-        for y in range(int(img.height*0.5), img.height):
-            alpha = int(200 * ((y - int(img.height*0.5)) / (img.height*0.5)))
-            draw_overlay.line([(0, y), (img.width, y)], fill=(0, 0, 0, alpha))
+        # 2. ساخت پس‌زمینه بلور شده (1080x1920)
+        bg_blur = bg.resize((1080, 1920), Image.LANCZOS)
+        bg_blur = bg_blur.filter(ImageFilter.GaussianBlur(25))
         
-        box_y_start, box_y_end = int(img.height * 0.65), int(img.height * 0.90)
-        draw_overlay.rounded_rectangle([int(img.width*0.05), box_y_start, int(img.width*0.95), box_y_end], radius=30, fill=(255, 255, 255, 30), outline=(255, 255, 255, 100), width=3)
+        # 3. قرار دادن عکس شارپ در وسط (با حفظ نسبت تصویر)
+        fg = bg.copy()
+        fg.thumbnail((1080, 1920), Image.LANCZOS)
+        bg_blur.paste(fg, ((1080 - fg.width) // 2, (1920 - fg.height) // 2))
+        img = bg_blur
         
-        box_region = img.crop((int(img.width*0.05), box_y_start, int(img.width*0.95), box_y_end))
-        img.paste(box_region.filter(ImageFilter.GaussianBlur(10)), (int(img.width*0.05), box_y_start))
-        
-        img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
+        # 4. کشیدن یک کادر مشکی نیمه‌شفاف در مرکز تصویر
         draw = ImageDraw.Draw(img)
-
+        box_top = int(1920 * 0.35)
+        box_bottom = int(1920 * 0.65)
+        
+        overlay = Image.new('RGBA', img.size, (0,0,0,0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        overlay_draw.rectangle([0, box_top, 1080, box_bottom], fill=(0, 0, 0, 200))
+        img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
+        
+        draw = ImageDraw.Draw(img)
+        
+        # 5. بارگذاری فونت
         font_path = os.path.expanduser("~/.fonts")
         vazir_bold = None
         if os.path.isdir(font_path):
@@ -330,40 +317,43 @@ def create_masterpiece_cover(base_image_path, video_title_en, part_num, total_pa
                 if f.endswith(".ttf") and "vazir" in f.lower() and "bold" in f.lower():
                     vazir_bold = os.path.join(font_path, f)
                     break
+                    
+        font_title = ImageFont.truetype(vazir_bold, int(1080 * 0.07)) if vazir_bold else ImageFont.load_default()
+        font_badge = ImageFont.truetype(vazir_bold, int(1080 * 0.06)) if vazir_bold else ImageFont.load_default()
+
+        # 6. نوشتن عنوان انگلیسی (بزرگ و وسط)
+        wrapped_title = textwrap.fill(video_title_en, width=20)
+        bbox = draw.multiline_textbbox((0,0), wrapped_title, font=font_title, align="center")
+        text_w, text_h = bbox[2]-bbox[0], bbox[3]-bbox[1]
         
-        font_en = ImageFont.truetype(vazir_bold, 70, layout_engine=ImageFont.Layout.RAQM) if vazir_bold else ImageFont.load_default()
-        font_badge = ImageFont.truetype(vazir_bold, 40) if vazir_bold else ImageFont.load_default()
-
-        wrapped_title = textwrap.fill(video_title_en, width=22)
-        text_bbox = draw.multiline_textbbox((0, 0), wrapped_title, font=font_en, align="center")
-        text_x = (img.width - (text_bbox[2] - text_bbox[0])) // 2
-        text_y = box_y_start + (box_y_end - box_y_start - (text_bbox[3] - text_bbox[1])) // 2 - 20
-
-        draw.multiline_text((text_x + 5, text_y + 5), wrapped_title, font=font_en, fill=(0, 0, 0, 200), align="center")
-        draw.multiline_text((text_x, text_y), wrapped_title, font=font_en, fill=(255, 255, 255), align="center")
-
+        text_x = (1080 - text_w) // 2
+        text_y = box_top + (box_bottom - box_top - text_h) // 2 - 40
+        
+        draw.multiline_text((text_x+3, text_y+3), wrapped_title, font=font_title, fill=(0,0,0), align="center") # سایه
+        draw.multiline_text((text_x, text_y), wrapped_title, font=font_title, fill=(255,255,255), align="center")
+        
+        # 7. نوشتن بج (EPISODE X OF Y)
         badge_text = f"EPISODE {part_num} OF {total_parts}"
-        badge_bbox = draw.textbbox((0, 0), badge_text, font=font_badge)
-        badge_w, badge_h = badge_bbox[2] - badge_bbox[0], badge_bbox[3] - badge_bbox[1]
-        badge_x = (img.width - badge_w) // 2
-        badge_y = text_y + (text_bbox[3] - text_bbox[1]) + 20
-
-        draw.rounded_rectangle([badge_x - 20, badge_y - 10, badge_x + badge_w + 20, badge_y + badge_h + 10], radius=15, fill=(255, 215, 0))
-        draw.text((badge_x, badge_y), badge_text, font=font_badge, fill=(0, 0, 0))
-
+        bbox_b = draw.textbbox((0,0), badge_text, font=font_badge)
+        bw, bh = bbox_b[2]-bbox_b[0], bbox_b[3]-bbox_b[1]
+        bx = (1080 - bw) // 2
+        by = text_y + text_h + 40
+        
+        draw.rounded_rectangle([bx-20, by-10, bx+bw+20, by+bh+10], radius=15, fill=(255, 215, 0))
+        draw.text((bx, by), badge_text, font=font_badge, fill=(0, 0, 0))
+        
         img.save(output_path, "JPEG", quality=95)
         return True
     except Exception as e:
-        print(f"⚠️ Masterpiece Cover Error: {e}")
+        print(f"⚠️ Cover Error: {e}")
         return False
 
 # ═══════════════════════════════════════════════════
-# پردازش ویدیو (برگشت به تنظیمات ظاهری دقیقاً مثل قبل)
+# پردازش ویدیو (زیرنویس دست نخورده)
 # ═══════════════════════════════════════════════════
 def process_full_video(video_path, full_srt_path):
     print("Processing full video with subtitles and blur background...")
     output_path = str(TMP_DIR / "full_subtitled.mp4")
-    # 🌟 موقعیت و ظاهر دقیقاً مثل نسخه سالم قبلی
     filter_complex = (
         f"[0:v]split=2[orig1][orig2];"
         f"[orig1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:3[bg];"
@@ -386,24 +376,12 @@ def create_shared_intro_video(shared_frame_path, output_path):
     except: return None
 
 # ═══════════════════════════════════════════════════
-# پردازش نهایی (فقط برای قسمت هدف)
+# پردازش نهایی (تک قسمت)
 # ═══════════════════════════════════════════════════
-def split_final_video(processed_video_path, duration, video_title_en, video_title_fa, translated_segments, shared_intro_video, target_part, num_parts):
+def split_final_video(processed_video_path, duration, video_title_en, video_title_fa, translated_segments, shared_intro_video, target_part, num_parts, best_cover_frame):
     part_duration = duration / num_parts
     outputs, captions, thumbnails = [], [], []
     
-    print("  [Cover] Preparing base image...")
-    ai_prompt = get_ai_cover_prompt(video_title_en)
-    ai_cover_base = str(TMP_DIR / "ai_cover_base.jpg")
-    ai_success = download_ai_image(ai_prompt, ai_cover_base)
-    
-    if not ai_success:
-        ai_cover_base = get_best_video_frame(processed_video_path, TMP_DIR)
-    
-    if not ai_cover_base or not os.path.exists(ai_cover_base):
-        ai_cover_base = str(TMP_DIR / "fallback_bg.jpg")
-        subprocess.run(["ffmpeg", "-y", "-ss", str(duration / 2), "-i", processed_video_path, "-vframes", "1", "-q:v", "2", ai_cover_base], check=True, capture_output=True)
-
     i = target_part - 1
     part_start = 0 if i == 0 else max(0, (i * part_duration) - OVERLAP_SECONDS)
     part_end = min((i + 1) * part_duration, duration)
@@ -435,7 +413,7 @@ def split_final_video(processed_video_path, duration, video_title_en, video_titl
         outputs.append(raw_part_path)
 
     thumb_path = str(TMP_DIR / f"part_{i+1}_thumb.jpg")
-    create_masterpiece_cover(ai_cover_base, video_title_en, i+1, num_parts, thumb_path)
+    create_masterpiece_cover(best_cover_frame, video_title_en, i+1, num_parts, thumb_path)
     thumbnails.append(thumb_path)
 
     return outputs, captions, thumbnails
@@ -451,7 +429,7 @@ def upload_to_instagram(video_path, caption, thumbnail_path=None):
 
 def main():
     print("=" * 60)
-    print("Auto Instagram Poster - One Part Per Run Edition")
+    print("Auto Instagram Poster - 2 Parts Per Run Edition")
     print("=" * 60)
     state = load_state()
     if not state["queue"]:
@@ -467,7 +445,7 @@ def main():
     existing_total_parts = state.get("total_parts", 0)
     
     print(f"Processing: {video['id']} - {video['title']}")
-    print(f"Target Part: {target_part}")
+    print(f"Target parts start from: {target_part}")
 
     try:
         video_title_en = video["title"]
@@ -493,29 +471,50 @@ def main():
             state["current_part"] = 1
             target_part = 1
 
+        # استخراج بهترین فریم برای کاور
         best_intro_frame = get_best_video_frame(processed_video, TMP_DIR)
         shared_intro = create_shared_intro_video(best_intro_frame, str(TMP_DIR / "shared_intro.mp4"))
-
-        parts, captions, thumbnails = split_final_video(processed_video, duration, video_title_en, video_title_fa, translated, shared_intro, target_part, num_parts)
-
-        media_id = upload_to_instagram(parts[0], captions[0], thumbnail_path=thumbnails[0])
-        print(f"Posted part {target_part}/{num_parts}: {media_id}")
-
-        state["stats"]["success"] += 1
-        state["current_part"] += 1
         
+        # استخراج بهترین فریم از ویدیوی اصلی (بدون بلور) برای کاور
+        best_cover_frame = get_best_video_frame(video_path, TMP_DIR)
+
+        # 🌟 تعیین اینکه کدام قسمت‌ها باید پردازش شوند (حداکثر ۲ قسمت)
+        parts_to_process = []
+        if target_part <= num_parts:
+            parts_to_process.append(target_part)
+        if target_part + 1 <= num_parts:
+            parts_to_process.append(target_part + 1)
+
+        print(f"Parts to process in this run: {parts_to_process}")
+
+        for p_num in parts_to_process:
+            parts, captions, thumbnails = split_final_video(processed_video, duration, video_title_en, video_title_fa, translated, shared_intro, p_num, num_parts, best_cover_frame)
+
+            media_id = upload_to_instagram(parts[0], captions[0], thumbnail_path=thumbnails[0])
+            print(f"Posted part {p_num}/{num_parts}: {media_id}")
+
+            state["stats"]["success"] += 1
+            state["current_part"] = p_num + 1
+            save_state(state)
+
+            # مکث ۲ دقیقه‌ای بین دو پست
+            if p_num != parts_to_process[-1]:
+                time.sleep(120)
+
+        # اگر ویدیو تموم شد، برو سراغ ویدیوی بعدی
         if state["current_part"] > state["total_parts"]:
             state["queue_index"] += 1
             state["current_part"] = 1
             state["total_parts"] = 0
             
         save_state(state)
-        telegram(f"✅ قسمت {target_part} از {num_parts} پست شد: {video_title_fa}")
+        telegram(f"✅ قسمت‌های {parts_to_process} پست شدند: {video_title_fa}")
+
     except Exception as e:
         print(f"❌ Error: {e}")
         state["stats"]["failed"] += 1
         save_state(state)
-        telegram(f"❌ خطا در پردازش قسمت {target_part} ویدیو {video_title_fa}:\n{str(e)[:300]}")
+        telegram(f"❌ خطا در پردازش ویدیو {video_title_fa}:\n{str(e)[:300]}")
     finally:
         shutil.rmtree(TMP_DIR, ignore_errors=True)
 
