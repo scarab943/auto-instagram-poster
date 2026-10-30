@@ -13,7 +13,6 @@ import cv2
 import requests
 from faster_whisper import WhisperModel
 from google import genai
-from instagrapi import Client
 
 import arabic_reshaper
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -22,7 +21,6 @@ import numpy as np
 # ═══════════════════════════════════════════════════
 # تنظیمات
 # ═══════════════════════════════════════════════════
-INSTAGRAM_SESSIONID = unquote(os.getenv("INSTAGRAM_SESSIONID", "").strip())
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL", "").strip()
@@ -73,11 +71,57 @@ def load_state():
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
 
-def telegram(msg):
+def telegram_text(msg):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=15)
-    except Exception as e: print(f"Telegram error: {e}")
+    except Exception as e: print(f"Telegram text error: {e}")
+
+# 🌟 تابع جدید: ارسال فایل‌ها به تلگرام
+def send_to_telegram(video_path, caption, thumbnail_path, part_num, total_parts):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: 
+        print("❌ Telegram config missing.")
+        return False
+
+    print(f"  [Telegram] Sending part {part_num}/{total_parts}...")
+    
+    # ۱. ارسال ویدیو
+    try:
+        with open(video_path, 'rb') as video_file:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo",
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": f"🎬 ویدیو قسمت {part_num} از {total_parts}"},
+                files={'video': video_file},
+                timeout=120
+            )
+    except Exception as e:
+        print(f"❌ Telegram video error: {e}")
+        return False
+
+    # ۲. ارسال کاور
+    if thumbnail_path and os.path.exists(thumbnail_path):
+        try:
+            with open(thumbnail_path, 'rb') as photo_file:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                    data={"chat_id": TELEGRAM_CHAT_ID, "caption": f"🖼 کاور قسمت {part_num}"},
+                    files={'photo': photo_file},
+                    timeout=60
+                )
+        except Exception as e:
+            print(f"❌ Telegram photo error: {e}")
+
+    # ۳. ارسال کپشن (جداگانه برای کپی راحت‌تر)
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": f"📝 کپشن قسمت {part_num}:\n\n{caption}"},
+            timeout=15
+        )
+    except Exception as e:
+        print(f"❌ Telegram caption error: {e}")
+
+    return True
 
 def fetch_channel_videos(channel_url):
     print(f"Fetching channel videos from: {channel_url}")
@@ -160,38 +204,27 @@ def merge_segments(segments, max_chars=150):
 def split_long_segment(seg):
     text = seg["text"].replace('\n', ' ').strip()
     if len(text) <= MAX_CHARS_PER_SUB: return [seg]
-    
     words = text.split()
-    chunks = []
-    current = []
-    current_len = 0
-    
+    chunks, current, current_len = [], [], 0
     for word in words:
         if current_len + len(word) + 1 <= MAX_CHARS_PER_SUB:
             current.append(word)
             current_len += len(word) + 1
         else:
-            if current:
-                chunks.append(" ".join(current))
+            if current: chunks.append(" ".join(current))
             current = [word]
             current_len = len(word) + 1
-            
-    if current:
-        chunks.append(" ".join(current))
-        
+    if current: chunks.append(" ".join(current))
     if len(chunks) <= 1: return [seg]
-    
     total_duration = seg["end"] - seg["start"]
     total_chars = sum(len(c) for c in chunks)
     current_time = seg["start"]
     new_segs = []
-    
     for chunk in chunks:
         if total_chars == 0: break
         chunk_duration = (len(chunk) / total_chars) * total_duration
         new_segs.append({"start": current_time, "end": current_time + chunk_duration, "text": chunk})
         current_time += chunk_duration
-        
     return new_segs
 
 def split_all_segments(segments):
@@ -227,7 +260,7 @@ def build_full_srt(segments, output_path):
             prev_end = seg["end"]
 
 # ═══════════════════════════════════════════════════
-# هوش مصنوعی (کپشن، هشتگ و عنوان کاور)
+# هوش مصنوعی
 # ═══════════════════════════════════════════════════
 def generate_caption(video_title, part_text, part_num, total_parts):
     fallback = {"summary": f"بخش {part_num} از {total_parts}", "hashtags_fa": "", "hashtags_en": ""}
@@ -262,13 +295,10 @@ def generate_caption(video_title, part_text, part_num, total_parts):
             time.sleep(1)
     return fallback
 
-# 🌟 تابع جدید: تولید عنوان کوتاه انگلیسی برای کاور
 def generate_smart_cover_title(video_title_en):
     if not GEMINI_CLIENTS:
         return video_title_en[:30] + "..." if len(video_title_en) > 30 else video_title_en
-    
     prompt = f"""You are a professional video cover designer. Based on this video title: "{video_title_en}", write a VERY SHORT, catchy English title (maximum 4 to 5 words) that perfectly summarizes the core message. Return ONLY the title text, nothing else. No quotes, no explanations."""
-    
     for client in GEMINI_CLIENTS:
         try:
             response = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
@@ -280,7 +310,7 @@ def generate_smart_cover_title(video_title_en):
     return video_title_en[:30] + "..."
 
 # ═══════════════════════════════════════════════════
-# توابع کاور (متن وسط، فونت درشت‌تر)
+# توابع کاور
 # ═══════════════════════════════════════════════════
 def get_best_video_frame(video_path, temp_dir):
     duration = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path], capture_output=True, text=True).stdout.strip())
@@ -301,12 +331,8 @@ def get_best_video_frame(video_path, temp_dir):
 def create_masterpiece_cover(raw_frame_path, cover_title_en, part_num, total_parts, output_path):
     try:
         bg = Image.open(raw_frame_path).convert("RGB")
-        
-        # پس‌زمینه بلور
         bg_blur = bg.resize((1080, 1920), Image.LANCZOS)
         bg_blur = bg_blur.filter(ImageFilter.GaussianBlur(25))
-        
-        # عکس شارپ وسط
         fg = bg.copy()
         fg.thumbnail((1080, 1920), Image.LANCZOS)
         bg_blur.paste(fg, ((1080 - fg.width) // 2, (1920 - fg.height) // 2))
@@ -316,7 +342,6 @@ def create_masterpiece_cover(raw_frame_path, cover_title_en, part_num, total_par
         box_top = int(1920 * 0.35)
         box_bottom = int(1920 * 0.65)
         
-        # کادر مشکی نیمه‌شفاف
         overlay = Image.new('RGBA', img.size, (0,0,0,0))
         overlay_draw = ImageDraw.Draw(overlay)
         overlay_draw.rectangle([0, box_top, 1080, box_bottom], fill=(0, 0, 0, 200))
@@ -331,7 +356,6 @@ def create_masterpiece_cover(raw_frame_path, cover_title_en, part_num, total_par
                     vazir_bold = os.path.join(font_path, f)
                     break
 
-        # تنظیم فونت عنوان (داینامیک)
         title_len = len(cover_title_en)
         if title_len > 25:
             font_size = int(1080 * 0.06)
@@ -344,8 +368,6 @@ def create_masterpiece_cover(raw_frame_path, cover_title_en, part_num, total_par
             wrap_width = 14
 
         font_title = ImageFont.truetype(vazir_bold, font_size) if vazir_bold else ImageFont.load_default()
-        
-        # 🌟 فونت بج (شماره قسمت) بسیار بزرگ‌تر شد
         font_badge = ImageFont.truetype(vazir_bold, int(1080 * 0.09)) if vazir_bold else ImageFont.load_default()
 
         wrapped_title = textwrap.fill(cover_title_en, width=wrap_width)
@@ -353,12 +375,11 @@ def create_masterpiece_cover(raw_frame_path, cover_title_en, part_num, total_par
         text_w, text_h = bbox[2]-bbox[0], bbox[3]-bbox[1]
         
         text_x = (1080 - text_w) // 2
-        text_y = box_top + (box_bottom - box_top - text_h) // 2 - 50 # بالاتر می‌بریم تا جای بج بزرگ بشه
+        text_y = box_top + (box_bottom - box_top - text_h) // 2 - 50
         
         draw.multiline_text((text_x+4, text_y+4), wrapped_title, font=font_title, fill=(0,0,0), align="center")
         draw.multiline_text((text_x, text_y), wrapped_title, font=font_title, fill=(255,255,255), align="center")
         
-        # بج (EPISODE X OF Y)
         badge_text = f"EPISODE {part_num} OF {total_parts}"
         bbox_b = draw.textbbox((0,0), badge_text, font=font_badge)
         bw, bh = bbox_b[2]-bbox_b[0], bbox_b[3]-bbox_b[1]
@@ -401,9 +422,6 @@ def create_shared_intro_video(shared_frame_path, output_path):
         return output_path
     except: return None
 
-# ═══════════════════════════════════════════════════
-# پردازش نهایی
-# ═══════════════════════════════════════════════════
 def split_final_video(processed_video_path, duration, cover_title_en, video_title_fa, translated_segments, shared_intro_video, target_part, num_parts, best_cover_frame):
     part_duration = duration / num_parts
     outputs, captions, thumbnails = [], [], []
@@ -421,6 +439,7 @@ def split_final_video(processed_video_path, duration, cover_title_en, video_titl
     print(f"  [Caption] Generating for part {i+1}/{num_parts}...")
     caption_data = generate_caption(video_title_fa, part_text, i+1, num_parts)
     
+    # کپشن نهایی (برای تلگرام)
     final_caption = f"🎬 **{video_title_fa}**\n\n"
     final_caption += f"{caption_data['summary']}\n\n"
     final_caption += f"{FIXED_HASHTAGS_FA} {caption_data.get('hashtags_fa', '')}\n"
@@ -445,17 +464,11 @@ def split_final_video(processed_video_path, duration, cover_title_en, video_titl
     return outputs, captions, thumbnails
 
 # ═══════════════════════════════════════════════════
-# آپلود و Main
+# Main
 # ═══════════════════════════════════════════════════
-def upload_to_instagram(video_path, caption, thumbnail_path=None):
-    cl = Client()
-    cl.login_by_sessionid(INSTAGRAM_SESSIONID)
-    kwargs = {"thumbnail": Path(thumbnail_path)} if thumbnail_path and Path(thumbnail_path).exists() else {}
-    return str(cl.clip_upload(video_path, caption, **kwargs).pk)
-
 def main():
     print("=" * 60)
-    print("Auto Instagram Poster - Smart Cover & 2 Parts Per Run")
+    print("Auto Video Generator -> Telegram (For Manual IG Posting)")
     print("=" * 60)
     state = load_state()
     if not state["queue"]:
@@ -477,14 +490,12 @@ def main():
         video_title_en = video["title"]
         video_title_fa = translate_text(video_title_en)
         
-        # 🌟 گرفتن عنوان هوشمند کوتاه برای کاور
         cover_title_en = generate_smart_cover_title(video_title_en)
         print(f"Smart Cover Title: {cover_title_en}")
         
         video_path = download_video(video["id"])
         audio_path = extract_audio(video_path)
         translated = translate_segments(transcribe(audio_path))
-        
         translated = split_all_segments(translated) 
         
         full_srt_path = str(TMP_DIR / "full.srt")
@@ -503,29 +514,29 @@ def main():
 
         best_intro_frame = get_best_video_frame(processed_video, TMP_DIR)
         shared_intro = create_shared_intro_video(best_intro_frame, str(TMP_DIR / "shared_intro.mp4"))
-        
         best_cover_frame = get_best_video_frame(video_path, TMP_DIR)
 
         parts_to_process = []
-        if target_part <= num_parts:
-            parts_to_process.append(target_part)
-        if target_part + 1 <= num_parts:
-            parts_to_process.append(target_part + 1)
+        if target_part <= num_parts: parts_to_process.append(target_part)
+        if target_part + 1 <= num_parts: parts_to_process.append(target_part + 1)
 
         print(f"Parts to process in this run: {parts_to_process}")
 
         for p_num in parts_to_process:
             parts, captions, thumbnails = split_final_video(processed_video, duration, cover_title_en, video_title_fa, translated, shared_intro, p_num, num_parts, best_cover_frame)
 
-            media_id = upload_to_instagram(parts[0], captions[0], thumbnail_path=thumbnails[0])
-            print(f"Posted part {p_num}/{num_parts}: {media_id}")
-
-            state["stats"]["success"] += 1
-            state["current_part"] = p_num + 1
-            save_state(state)
+            # 🌟 ارسال به تلگرام به جای اینستاگرام
+            success = send_to_telegram(parts[0], captions[0], thumbnails[0], p_num, num_parts)
+            if success:
+                print(f"✅ Sent part {p_num}/{num_parts} to Telegram.")
+                state["stats"]["success"] += 1
+                state["current_part"] = p_num + 1
+                save_state(state)
+            else:
+                print(f"❌ Failed to send part {p_num} to Telegram.")
 
             if p_num != parts_to_process[-1]:
-                time.sleep(120)
+                time.sleep(10) # فقط ۱۰ ثانیه صبر بین دو قسمت تلگرام
 
         if state["current_part"] > state["total_parts"]:
             state["queue_index"] += 1
@@ -533,13 +544,13 @@ def main():
             state["total_parts"] = 0
             
         save_state(state)
-        telegram(f"✅ قسمت‌های {parts_to_process} پست شدند: {video_title_fa}")
+        telegram_text(f"✅ قسمت‌های {parts_to_process} به تلگرام ارسال شدند: {video_title_fa}")
 
     except Exception as e:
         print(f"❌ Error: {e}")
         state["stats"]["failed"] += 1
         save_state(state)
-        telegram(f"❌ خطا در پردازش ویدیو {video_title_fa}:\n{str(e)[:300]}")
+        telegram_text(f"❌ خطا در پردازش ویدیو {video_title_fa}:\n{str(e)[:300]}")
     finally:
         shutil.rmtree(TMP_DIR, ignore_errors=True)
 
