@@ -5,13 +5,13 @@ import subprocess
 import tempfile
 import shutil
 import textwrap
-import random
+import html
 from pathlib import Path
-from urllib.parse import unquote, quote
+
 import requests
 from faster_whisper import WhisperModel
 from google import genai
-import arabic_reshaper
+
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import numpy as np
 
@@ -23,17 +23,21 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 YOUTUBE_CHANNEL_URL = os.getenv("YOUTUBE_CHANNEL_URL", "").strip()
 YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "").strip()
 
+# فعال‌سازی حالت تست (برای ارسال نشدن به تلگرام)
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+
 WARP_PROXY = "socks5://127.0.0.1:40000"
 PO_TOKEN_PROVIDER_URL = "http://127.0.0.1:4416"
 
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
-MAX_SEGMENT_DURATION = 90
+MAX_SEGMENT_DURATION = 150  # 🌟 تغییر از ۹۰ به ۱۵۰ ثانیه (۲.۵ دقیقه)
 OVERLAP_SECONDS = 3
 MAX_CHARS_PER_SUB = 40
 
-FIXED_HASHTAGS_FA = "#انگیزشی #توسعه_فردی #داستان_انگیزشی #روانشناسی"
-FIXED_HASHTAGS_EN = "#motivation #success #selfimprovement #mindset"
+# 🌟 هشتگ‌های ثابت (فقط ۲ عدد برای اینکه جای پویا داشته باشیم)
+FIXED_HASHTAGS_FA = "#انگیزشی #توسعه_فردی"
+FIXED_HASHTAGS_EN = "#motivation #success"
 
 GEMINI_CLIENTS = []
 for i in range(1, 5):
@@ -67,12 +71,27 @@ def load_state():
     return default_state
 
 def save_state(state):
+    # 🌟 ذخیره اتمیک با بکاپ (Atomic Save)
+    if DRY_RUN:
+        print("⚠️ DRY_RUN is active. State not saved to disk.")
+        return
     try:
-        STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        json_str = json.dumps(state, ensure_ascii=False, indent=2)
+        bak_file = STATE_FILE.with_suffix('.json.bak')
+        temp_file = STATE_FILE.with_suffix('.tmp')
+        
+        if STATE_FILE.exists():
+            shutil.copy2(STATE_FILE, bak_file)
+            
+        temp_file.write_text(json_str, encoding="utf-8")
+        temp_file.replace(STATE_FILE)
     except Exception as e:
         print(f"⚠️ Error saving state: {e}")
 
 def telegram_text(msg):
+    if DRY_RUN:
+        print(f"  [DRY_RUN] Would send Telegram text: {msg}")
+        return
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=15)
@@ -80,6 +99,11 @@ def telegram_text(msg):
         print(f"⚠️ Telegram text error: {e}")
 
 def send_to_telegram(video_path, caption, thumbnail_path, part_num, total_parts):
+    if DRY_RUN:
+        print(f"  [DRY_RUN] Would send part {part_num}/{total_parts} to Telegram.")
+        print(f"  [DRY_RUN] Generated Caption:\n{caption}\n")
+        return True
+
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: 
         print("❌ Telegram config missing.")
         return False
@@ -88,7 +112,7 @@ def send_to_telegram(video_path, caption, thumbnail_path, part_num, total_parts)
     
     try:
         with open(video_path, 'rb') as video_file:
-            res = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo", data={"chat_id": TELEGRAM_CHAT_ID, "caption": f"🎬 ویدیو قسمت {part_num} از {total_parts}"}, files={'video': video_file}, timeout=180)
+            res = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo", data={"chat_id": TELEGRAM_CHAT_ID, "caption": f"🎬 ویدیو قسمت {part_num} از {total_parts}", "parse_mode": "HTML"}, files={'video': video_file}, timeout=180)
             if res.status_code != 200:
                 print(f"❌ Telegram video response failed: {res.text}")
                 return False
@@ -99,12 +123,13 @@ def send_to_telegram(video_path, caption, thumbnail_path, part_num, total_parts)
     if thumbnail_path and os.path.exists(thumbnail_path):
         try:
             with open(thumbnail_path, 'rb') as photo_file:
-                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto", data={"chat_id": TELEGRAM_CHAT_ID, "caption": f"🖼 کاور قسمت {part_num}"}, files={'photo': photo_file}, timeout=60)
+                requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto", data={"chat_id": TELEGRAM_CHAT_ID, "caption": f"🖼 کاور قسمت {part_num}", "parse_mode": "HTML"}, files={'photo': photo_file}, timeout=60)
         except Exception as e:
             print(f"❌ Telegram photo error: {e}")
 
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", data={"chat_id": TELEGRAM_CHAT_ID, "text": f"📝 کپشن قسمت {part_num}:\n\n{caption}"}, timeout=15)
+        # 🌟 استفاده از HTML به جای مارک‌داون
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", data={"chat_id": TELEGRAM_CHAT_ID, "text": f"📝 کپشن قسمت {part_num}:\n\n{caption}", "parse_mode": "HTML"}, timeout=15)
     except Exception as e:
         print(f"❌ Telegram caption error: {e}")
 
@@ -255,19 +280,19 @@ def build_full_srt(segments, output_path):
             prev_end = seg["end"]
 
 # ═══════════════════════════════════════════════════
-# هوش مصنوعی (Gemini)
+# هوش مصنوعی (تولید کپشن و هشتگ‌های محدود)
 # ═══════════════════════════════════════════════════
 def generate_caption(video_title, part_text, part_num, total_parts):
-    fallback = {"summary": f"بخش {part_num} از {total_parts}", "hashtags_fa": "", "hashtags_en": ""}
+    fallback = {"summary": f"بخش {part_num} از {total_parts}", "hashtag_fa": ""}
     if not GEMINI_CLIENTS: return fallback
 
+    # 🌟 پرامپت تغییر کرد تا فقط ۱ هشتگ فارسی تولید کند (مجموع با ثابت‌ها می‌شود ۵)
     prompt = f"""تو یک کپی‌رایتر حرفه‌ای اینستاگرام هستی.
 عنوان ویدیو: "{video_title}"
 متن این قسمت: "{part_text}"
 ۱. یک خلاصه بسیار کوتاه (فقط ۱ یا ۲ خط) و جذاب از این قسمت به فارسی بنویس.
-۲. ۴ هشتگ تخصصی فارسی که به موضوع این داستان می‌خورد.
-۳. ۴ هشتگ تخصصی انگلیسی که به موضوع این داستان می‌خورد.
-خروجی را دقیقاً در قالب JSON با کلیدهای "summary"، "hashtags_fa" و "hashtags_en" برگردان."""
+۲. دقیقاً ۱ هشتگ تخصصی فارسی که به موضوع این داستان می‌خورد (فقط با علامت #).
+خروجی را دقیقاً در قالب JSON با کلیدهای "summary" و "hashtag_fa" برگردان."""
 
     for client in GEMINI_CLIENTS:
         try:
@@ -277,10 +302,9 @@ def generate_caption(video_title, part_text, part_num, total_parts):
                     type=genai.types.Type.OBJECT,
                     properties={
                         "summary": genai.types.Schema(type=genai.types.Type.STRING),
-                        "hashtags_fa": genai.types.Schema(type=genai.types.Type.STRING),
-                        "hashtags_en": genai.types.Schema(type=genai.types.Type.STRING),
+                        "hashtag_fa": genai.types.Schema(type=genai.types.Type.STRING),
                     },
-                    required=["summary", "hashtags_fa", "hashtags_en"]
+                    required=["summary", "hashtag_fa"]
                 )
             )
             response = client.models.generate_content(model="gemini-3.8-flash", contents=prompt, config=config)
@@ -293,9 +317,7 @@ def generate_caption(video_title, part_text, part_num, total_parts):
 def generate_smart_cover_title(video_title_en):
     if not GEMINI_CLIENTS:
         return video_title_en[:30] + "..." if len(video_title_en) > 30 else video_title_en
-    
     prompt = f"""You are a professional video cover designer. Based on this video title: "{video_title_en}", write a VERY SHORT, catchy English title (maximum 4 to 5 words) that perfectly summarizes the core message. Return ONLY the title text, nothing else. No quotes, no explanations."""
-    
     for client in GEMINI_CLIENTS:
         try:
             response = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
@@ -307,13 +329,12 @@ def generate_smart_cover_title(video_title_en):
     return video_title_en[:30] + "..."
 
 # ═══════════════════════════════════════════════════
-# کاور (با Import ایمن برای cv2)
+# کاور (شیشه‌ای)
 # ═══════════════════════════════════════════════════
 def get_best_video_frame(video_path, temp_dir):
     try:
         import cv2
     except ImportError:
-        print("⚠️ OpenCV not found. Using default frame extraction.")
         cv2 = None
 
     res = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", video_path], capture_output=True, text=True)
@@ -418,7 +439,6 @@ def process_full_video(video_path, full_srt_path):
     print("Processing full video with subtitles and blur background...")
     output_path = str(TMP_DIR / "full_subtitled.mp4")
     
-    # 🌟 پرانتز بسته اضافه شد و ساختار درست شد
     filter_complex = (
         f"[0:v]split=2[orig1][orig2];"
         f"[orig1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:3[bg];"
@@ -463,10 +483,14 @@ def split_final_video(processed_video_path, duration, cover_title_en, video_titl
     print(f"  [Caption] Generating for part {i+1}/{num_parts}...")
     caption_data = generate_caption(video_title_fa, part_text, i+1, num_parts)
     
-    final_caption = f"🎬 **{video_title_fa}**\n\n"
+    # 🌟 ترکیب هشتگ‌ها برای رسیدن به دقیقاً ۵ عدد و استفاده از تگ <b> برای بولد شدن
+    safe_title = html.escape(video_title_fa)
+    final_caption = f"🎬 <b>{safe_title}</b>\n\n"
     final_caption += f"{caption_data['summary']}\n\n"
-    final_caption += f"{FIXED_HASHTAGS_FA} {caption_data.get('hashtags_fa', '')}\n"
-    final_caption += f"{FIXED_HASHTAGS_EN} {caption_data.get('hashtags_en', '')}"
+    final_caption += f"{FIXED_HASHTAGS_FA} {FIXED_HASHTAGS_EN} {caption_data.get('hashtag_fa', '')}"
+    
+    # تمیز کردن فاصله‌های اضافی
+    final_caption = "\n".join([line.strip() for line in final_caption.split("\n") if line.strip()])
     captions.append(final_caption)
 
     subprocess.run(["ffmpeg", "-y", "-ss", str(part_start), "-i", processed_video_path, "-t", str(part_len), "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", "-r", "30", "-movflags", "+faststart", raw_part_path], check=True, capture_output=True)
@@ -492,6 +516,8 @@ def split_final_video(processed_video_path, duration, cover_title_en, video_titl
 def main():
     print("=" * 60)
     print("Auto Video Generator -> Telegram (Stable Edition)")
+    if DRY_RUN:
+        print("⚠️ WARNING: DRY_RUN MODE IS ACTIVE. State and Telegram will NOT be updated.")
     print("=" * 60)
     
     state = load_state()
@@ -559,16 +585,17 @@ def main():
             success = send_to_telegram(parts[0], captions[0], thumbnails[0], p_num, num_parts)
             if success:
                 print(f"✅ Sent part {p_num}/{num_parts} to Telegram.")
-                state["stats"]["success"] += 1
-                state["current_part"] = p_num + 1
-                save_state(state)
+                if not DRY_RUN:
+                    state["stats"]["success"] += 1
+                    state["current_part"] = p_num + 1
+                    save_state(state)
             else:
                 print(f"❌ Failed to send part {p_num} to Telegram.")
 
             if p_num != parts_to_process[-1]:
                 time.sleep(10)
 
-        if state["current_part"] > state["total_parts"]:
+        if state["current_part"] > state["total_parts"] and not DRY_RUN:
             state["queue_index"] += 1
             state["current_part"] = 1
             state["total_parts"] = 0
@@ -578,8 +605,9 @@ def main():
 
     except Exception as e:
         print(f"❌ Error in main process: {e}")
-        state["stats"]["failed"] += 1
-        save_state(state)
+        if not DRY_RUN:
+            state["stats"]["failed"] += 1
+            save_state(state)
         telegram_text(f"❌ خطا در پردازش ویدیو:\n{str(e)[:300]}")
     finally:
         if TMP_DIR.exists():
