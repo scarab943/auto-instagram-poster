@@ -348,14 +348,26 @@ def create_masterpiece_cover(raw_frame_path, cover_title_en, part_num, total_par
         img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
         draw = ImageDraw.Draw(img)
         
+        # 🌟 پیدا کردن فونت به صورت هوشمند و ضدضربه
+        font_file = None
         font_path = os.path.expanduser("~/.fonts")
-        vazir_bold = None
+        
+        # 1. جستجو در پوشه فونت‌های دانلود شده (هر فایلی که vazir داشته باشد)
         if os.path.isdir(font_path):
             for f in os.listdir(font_path):
-                if f.endswith(".ttf") and "vazir" in f.lower() and "bold" in f.lower():
-                    vazir_bold = os.path.join(font_path, f)
+                if f.endswith(".ttf") and "vazir" in f.lower():
+                    font_file = os.path.join(font_path, f)
+                    break
+                    
+        # 2. اگر فونت وزیر پیدا نشد، از فونت‌های پیش‌فرض سیستم (DejaVu) استفاده کن
+        if not font_file:
+            for sys_font in ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 
+                             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]:
+                if os.path.exists(sys_font):
+                    font_file = sys_font
                     break
 
+        # تنظیم سایز فونت بر اساس طول عنوان
         title_len = len(cover_title_en)
         if title_len > 25:
             font_size = int(1080 * 0.06)
@@ -367,9 +379,16 @@ def create_masterpiece_cover(raw_frame_path, cover_title_en, part_num, total_par
             font_size = int(1080 * 0.09)
             wrap_width = 14
 
-        font_title = ImageFont.truetype(vazir_bold, font_size) if vazir_bold else ImageFont.load_default()
-        font_badge = ImageFont.truetype(vazir_bold, int(1080 * 0.09)) if vazir_bold else ImageFont.load_default()
+        try:
+            # تلاش برای لود فونت
+            font_title = ImageFont.truetype(font_file, font_size) if font_file else ImageFont.load_default()
+            font_badge = ImageFont.truetype(font_file, int(1080 * 0.09)) if font_file else ImageFont.load_default()
+        except Exception as e:
+            print(f"⚠️ Font loading error: {e}")
+            font_title = ImageFont.load_default()
+            font_badge = ImageFont.load_default()
 
+        # نوشتن عنوان انگلیسی
         wrapped_title = textwrap.fill(cover_title_en, width=wrap_width)
         bbox = draw.multiline_textbbox((0,0), wrapped_title, font=font_title, align="center")
         text_w, text_h = bbox[2]-bbox[0], bbox[3]-bbox[1]
@@ -380,6 +399,7 @@ def create_masterpiece_cover(raw_frame_path, cover_title_en, part_num, total_par
         draw.multiline_text((text_x+4, text_y+4), wrapped_title, font=font_title, fill=(0,0,0), align="center")
         draw.multiline_text((text_x, text_y), wrapped_title, font=font_title, fill=(255,255,255), align="center")
         
+        # نوشتن بج (EPISODE X OF Y)
         badge_text = f"EPISODE {part_num} OF {total_parts}"
         bbox_b = draw.textbbox((0,0), badge_text, font=font_badge)
         bw, bh = bbox_b[2]-bbox_b[0], bbox_b[3]-bbox_b[1]
@@ -394,7 +414,6 @@ def create_masterpiece_cover(raw_frame_path, cover_title_en, part_num, total_par
     except Exception as e:
         print(f"⚠️ Cover Error: {e}")
         return False
-
 # ═══════════════════════════════════════════════════
 # پردازش ویدیو
 # ═══════════════════════════════════════════════════
