@@ -8,5 +8,4 @@ arabic-reshaper
 python-bidi
 Pillow
 numpy
-edge-tts
 opencv-python
