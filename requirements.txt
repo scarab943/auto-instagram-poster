@@ -1,4 +1,4 @@
-yt-dlp[default]
+yt-dlp[default]==2026.10.26
 faster-whisper
 av==12.3.0
 requests
