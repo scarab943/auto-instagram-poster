@@ -31,11 +31,11 @@ PO_TOKEN_PROVIDER_URL = "http://127.0.0.1:4416"
 
 STATE_FILE = Path("state.json")
 TMP_DIR = Path(tempfile.mkdtemp(prefix="auto_post_"))
-MAX_SEGMENT_DURATION = 150  # 🌟 تغییر از ۹۰ به ۱۵۰ ثانیه (۲.۵ دقیقه)
+MAX_SEGMENT_DURATION = 150  # 🌟 ۱۵۰ ثانیه (۲.۵ دقیقه)
 OVERLAP_SECONDS = 3
 MAX_CHARS_PER_SUB = 40
 
-# 🌟 هشتگ‌های ثابت (فقط ۲ عدد برای اینکه جای پویا داشته باشیم)
+# 🌟 هشتگ‌های ثابت (دقیقاً ۲ عدد از هر زبان)
 FIXED_HASHTAGS_FA = "#انگیزشی #توسعه_فردی"
 FIXED_HASHTAGS_EN = "#motivation #success"
 
@@ -128,7 +128,6 @@ def send_to_telegram(video_path, caption, thumbnail_path, part_num, total_parts)
             print(f"❌ Telegram photo error: {e}")
 
     try:
-        # 🌟 استفاده از HTML به جای مارک‌داون
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", data={"chat_id": TELEGRAM_CHAT_ID, "text": f"📝 کپشن قسمت {part_num}:\n\n{caption}", "parse_mode": "HTML"}, timeout=15)
     except Exception as e:
         print(f"❌ Telegram caption error: {e}")
@@ -176,8 +175,11 @@ def download_video(video_id):
                 for f in TMP_DIR.glob(f"{video_id}.*"):
                     if f.suffix in (".mp4", ".mkv", ".webm"): 
                         return str(f)
-        except Exception: 
-            pass
+            else:
+                # 🌟 چاپ کردن خطای واقعی یوتیوب برای دیباگ
+                print(f"⚠️ yt-dlp attempt with {fmt} failed. Error:\n{r.stderr[:500]}")
+        except Exception as e: 
+            print(f"⚠️ Download exception: {e}")
     raise RuntimeError("Download failed across all formats.")
 
 def extract_audio(video_path):
@@ -192,6 +194,20 @@ def transcribe(audio_path):
 
 def translate_text(text):
     if not text.strip(): return ""
+    
+    # 🌟 استفاده از هوش مصنوعی Gemini برای ترجمه روان‌تر
+    if GEMINI_CLIENTS:
+        prompt = f"Translate the following English text to fluent, natural, and colloquial Persian. Return ONLY the Persian translation without any extra explanations, quotes, or English text:\n\n{text}"
+        for client in GEMINI_CLIENTS:
+            try:
+                response = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
+                if response.text:
+                    return response.text.strip()
+            except Exception as e:
+                print(f"  ⚠️ Gemini translation error: {str(e)[:50]}")
+                time.sleep(1)
+                
+    # در صورتی که هوش مصنوعی خطا داد، به عنوان پشتیبان از MyMemory استفاده می‌کند
     url = "https://api.mymemory.translated.net/get"
     for attempt in range(3):
         try:
@@ -258,7 +274,7 @@ def translate_segments(segments):
     result = []
     for seg in merged:
         result.append({"start": seg["start"], "end": seg["end"], "text": translate_text(seg["text"])})
-        time.sleep(0.2)
+        time.sleep(1) # 🌟 افزایش تاخیر به ۱ ثانیه برای جلوگیری از محدودیت Gemini
     return result
 
 def format_time(seconds):
@@ -286,7 +302,6 @@ def generate_caption(video_title, part_text, part_num, total_parts):
     fallback = {"summary": f"بخش {part_num} از {total_parts}", "hashtag_fa": ""}
     if not GEMINI_CLIENTS: return fallback
 
-    # 🌟 پرامپت تغییر کرد تا فقط ۱ هشتگ فارسی تولید کند (مجموع با ثابت‌ها می‌شود ۵)
     prompt = f"""تو یک کپی‌رایتر حرفه‌ای اینستاگرام هستی.
 عنوان ویدیو: "{video_title}"
 متن این قسمت: "{part_text}"
@@ -483,13 +498,11 @@ def split_final_video(processed_video_path, duration, cover_title_en, video_titl
     print(f"  [Caption] Generating for part {i+1}/{num_parts}...")
     caption_data = generate_caption(video_title_fa, part_text, i+1, num_parts)
     
-    # 🌟 ترکیب هشتگ‌ها برای رسیدن به دقیقاً ۵ عدد و استفاده از تگ <b> برای بولد شدن
     safe_title = html.escape(video_title_fa)
     final_caption = f"🎬 <b>{safe_title}</b>\n\n"
     final_caption += f"{caption_data['summary']}\n\n"
     final_caption += f"{FIXED_HASHTAGS_FA} {FIXED_HASHTAGS_EN} {caption_data.get('hashtag_fa', '')}"
     
-    # تمیز کردن فاصله‌های اضافی
     final_caption = "\n".join([line.strip() for line in final_caption.split("\n") if line.strip()])
     captions.append(final_caption)
 
