@@ -341,11 +341,11 @@
       "duration": 419.0
     }
   ],
-  "queue_index": 37,
+  "queue_index": 38,
   "stats": {
-    "success": 87,
+    "success": 88,
     "failed": 9
   },
-  "current_part": 3,
-  "total_parts": 3
+  "current_part": 1,
+  "total_parts": 0
 }
