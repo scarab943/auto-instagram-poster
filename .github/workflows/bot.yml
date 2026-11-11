@@ -27,26 +27,17 @@ jobs:
       contents: write
 
     env:
-      # Secrets اینستاگرام و هوش مصنوعی
       INSTAGRAM_SESSIONID:   ${{ secrets.INSTAGRAM_SESSIONID }}
       GEMINI_KEY_1:          ${{ secrets.GEMINI_KEY_1 }}
       GEMINI_KEY_2:          ${{ secrets.GEMINI_KEY_2 }}
       GEMINI_KEY_3:          ${{ secrets.GEMINI_KEY_3 }}
       GEMINI_KEY_4:          ${{ secrets.GEMINI_KEY_4 }}
-      
-      # Secrets تلگرام (برای ارسال هشدار خطا)
       TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
-      
-      # Secrets یوتیوب
       YOUTUBE_CHANNEL_URL:   ${{ secrets.YOUTUBE_CHANNEL_URL }}
       YOUTUBE_COOKIES:       ${{ secrets.YOUTUBE_COOKIES }}
-      
-      # تنظیمات پروکسی و PO Token
       WARP_PROXY:            socks5://127.0.0.1:40000
       PO_TOKEN_PROVIDER_URL: http://127.0.0.1:4416
-      
-      # تنظیمات اجرا
       DRY_RUN:               ${{ github.event.inputs.dry_run || 'false' }}
       PARTS_PER_RUN:         ${{ github.event.inputs.parts_per_run || '2' }}
       GITHUB_ACTIONS:        "true"
@@ -79,10 +70,14 @@ jobs:
           python-version: '3.11'
           cache: pip
 
-      - name: Install system deps (FFmpeg, Fonts, Deno, Unzip)
+      - name: Install system deps (Fonts, Deno, Unzip)
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg fontconfig curl unzip
+          # تنظیم تایم اوت برای جلوگیری از گیر کردن سرور
+          sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update -qq || true
+          sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y -qq fontconfig curl unzip || true
+          
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
 
@@ -106,7 +101,8 @@ jobs:
             | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp.gpg
           echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" \
             | sudo tee /etc/apt/sources.list.d/cloudflare-warp.list
-          sudo apt-get update && sudo apt-get install -y cloudflare-warp
+          sudo apt-get update -qq || true
+          sudo apt-get install -y -qq cloudflare-warp || true
           warp-cli --accept-tos registration new || true
           warp-cli --accept-tos mode proxy || true
           warp-cli --accept-tos proxy port 40000 || true
