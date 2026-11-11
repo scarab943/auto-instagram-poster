@@ -1,0 +1,143 @@
+name: Auto Video Bot (Instagram Direct)
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # هر ۶ ساعت
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'DRY_RUN mode (تست بدون پست در اینستاگرام)'
+        type: boolean
+        default: false
+      parts_per_run:
+        description: 'Parts per run (تعداد پست در هر اجرا)'
+        type: choice
+        options: ['1', '2']
+        default: '2'
+
+concurrency:
+  group: auto-video-bot
+  cancel-in-progress: false
+
+jobs:
+  process:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 300
+    permissions:
+      contents: write
+
+    env:
+      # Secrets اینستاگرام و هوش مصنوعی
+      INSTAGRAM_SESSIONID:   ${{ secrets.INSTAGRAM_SESSIONID }}
+      GEMINI_KEY_1:          ${{ secrets.GEMINI_KEY_1 }}
+      GEMINI_KEY_2:          ${{ secrets.GEMINI_KEY_2 }}
+      GEMINI_KEY_3:          ${{ secrets.GEMINI_KEY_3 }}
+      GEMINI_KEY_4:          ${{ secrets.GEMINI_KEY_4 }}
+      
+      # Secrets تلگرام (برای ارسال هشدار خطا)
+      TELEGRAM_BOT_TOKEN:    ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:      ${{ secrets.TELEGRAM_CHAT_ID }}
+      
+      # Secrets یوتیوب
+      YOUTUBE_CHANNEL_URL:   ${{ secrets.YOUTUBE_CHANNEL_URL }}
+      YOUTUBE_COOKIES:       ${{ secrets.YOUTUBE_COOKIES }}
+      
+      # تنظیمات پروکسی و PO Token
+      WARP_PROXY:            socks5://127.0.0.1:40000
+      PO_TOKEN_PROVIDER_URL: http://127.0.0.1:4416
+      
+      # تنظیمات اجرا
+      DRY_RUN:               ${{ github.event.inputs.dry_run || 'false' }}
+      PARTS_PER_RUN:         ${{ github.event.inputs.parts_per_run || '2' }}
+      GITHUB_ACTIONS:        "true"
+      HF_HOME:               ${{ github.workspace }}/.hf-cache
+      PYTHONUNBUFFERED:      "1"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Restore state from 'state' branch
+        run: bash scripts/persist-state.sh restore
+
+      - name: Cache HuggingFace (whisper model)
+        uses: actions/cache@v4
+        with:
+          path: .hf-cache
+          key: hf-whisper-small-en-v1
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('requirements.txt') }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install system deps (FFmpeg, Fonts, Deno)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fontconfig curl
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
+
+      - name: Install python deps
+        run: |
+          pip install -U yt-dlp
+          pip install -r requirements.txt
+
+      - name: Install Vazir font
+        run: |
+          mkdir -p ~/.fonts
+          curl -fsSL -o ~/.fonts/Vazir.ttf      https://github.com/rastikerdar/vazir-font/raw/master/dist/Vazir-Regular.ttf
+          curl -fsSL -o ~/.fonts/Vazir-Bold.ttf https://github.com/rastikerdar/vazir-font/raw/master/dist/Vazir-Bold.ttf
+          fc-cache -f ~/.fonts
+
+      - name: Setup WARP proxy (soft-fail)
+        continue-on-error: true
+        run: |
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg \
+            | sudo gpg --dearmor -o /usr/share/keyrings/cloudflare-warp.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/cloudflare-warp.list
+          sudo apt-get update && sudo apt-get install -y cloudflare-warp
+          warp-cli --accept-tos registration new || true
+          warp-cli --accept-tos mode proxy || true
+          warp-cli --accept-tos proxy port 40000 || true
+          warp-cli --accept-tos connect || true
+          sleep 5
+          curl -s --socks5-hostname 127.0.0.1:40000 -m 8 -o /dev/null https://www.google.com \
+            && echo "WARP OK" || echo "WARP failed — will rely on cookies"
+
+      - name: Setup PO-token provider (soft-fail)
+        continue-on-error: true
+        run: |
+          git clone --depth=1 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /tmp/pot
+          cd /tmp/pot/server
+          npm install --no-audit --no-fund
+          npx tsc
+          nohup node build/main.js > /tmp/pot.log 2>&1 &
+          sleep 3
+          curl -sf http://127.0.0.1:4416/ping && echo "POT OK" || echo "POT unavailable"
+
+      - name: Run bot
+        run: python3 bot.py
+
+      - name: Persist state to 'state' branch
+        if: always()
+        run: bash scripts/persist-state.sh save
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-logs
+          path: |
+            /tmp/pot.log
+            *.log
+          if-no-files-found: ignore
