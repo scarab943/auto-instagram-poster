@@ -79,10 +79,10 @@ jobs:
           python-version: '3.11'
           cache: pip
 
-      - name: Install system deps (FFmpeg, Fonts, Deno)
+      - name: Install system deps (FFmpeg, Fonts, Deno, Unzip)
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fontconfig curl
+          sudo apt-get install -y ffmpeg fontconfig curl unzip
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
 
@@ -93,10 +93,11 @@ jobs:
 
       - name: Install Vazir font
         run: |
+          wget -q https://github.com/rastikerdar/vazir-font/releases/download/v30.1.0/vazir-font-v30.1.0.zip -O /tmp/vazir.zip
+          unzip -q /tmp/vazir.zip -d /tmp/vazir
           mkdir -p ~/.fonts
-          curl -fsSL -o ~/.fonts/Vazir.ttf      https://github.com/rastikerdar/vazir-font/raw/master/dist/Vazir-Regular.ttf
-          curl -fsSL -o ~/.fonts/Vazir-Bold.ttf https://github.com/rastikerdar/vazir-font/raw/master/dist/Vazir-Bold.ttf
-          fc-cache -f ~/.fonts
+          find /tmp/vazir -name "*.ttf" -exec cp {} ~/.fonts/ \;
+          fc-cache -f
 
       - name: Setup WARP proxy (soft-fail)
         continue-on-error: true
