@@ -344,8 +344,10 @@
   "queue_index": 38,
   "stats": {
     "success": 89,
-    "failed": 9
+    "failed": 10
   },
   "current_part": 2,
-  "total_parts": 3
+  "total_parts": 3,
+  "source_duration": 0,
+  "checkpoint_step": "transcribing"
 }
