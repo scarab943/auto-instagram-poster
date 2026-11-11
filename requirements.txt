@@ -1,0 +1,8 @@
+yt-dlp[default]
+faster-whisper
+requests
+google-genai
+instagrapi
+Pillow
+numpy
+opencv-python-headless
