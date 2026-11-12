@@ -1,4 +1,4 @@
-import os, textwrap
+import os, textwrap, glob
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from core.config import Config
 import logging
@@ -17,17 +17,25 @@ def create_masterpiece_cover(best_cover_frame, cover_title_en, part_num, total_p
         img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
         draw = ImageDraw.Draw(img)
 
+        # 🌟 پیدا کردن هوشمند هر فونت وزیری که توی پوشه باشه
         font_file = None
-        for f_path in [os.path.expanduser("~/.fonts"), "/usr/share/fonts/truetype/dejavu"]:
-            if os.path.isdir(f_path):
-                for f in os.listdir(f_path):
-                    if f.endswith(".ttf") and ("vazir" in f.lower() or "dejavusans-bold" in f.lower()):
-                        font_file = os.path.join(f_path, f); break
-            if font_file: break
+        font_dir = os.path.expanduser("~/.fonts")
+        if os.path.isdir(font_dir):
+            font_files = glob.glob(os.path.join(font_dir, "*.ttf"))
+            if font_files:
+                font_file = font_files[0] # اولین فونت وزیر رو بردار
+
+        if not font_file:
+            font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
         font_size, wrap_width = (int(1080 * 0.06), 22) if len(cover_title_en) > 25 else (int(1080 * 0.09), 14)
-        font_title = ImageFont.truetype(font_file, font_size) if font_file else ImageFont.load_default()
-        font_badge = ImageFont.truetype(font_file, int(1080 * 0.09)) if font_file else ImageFont.load_default()
+        
+        try:
+            font_title = ImageFont.truetype(font_file, font_size)
+            font_badge = ImageFont.truetype(font_file, int(1080 * 0.09))
+        except:
+            font_title = ImageFont.load_default()
+            font_badge = ImageFont.load_default()
 
         wrapped = textwrap.fill(cover_title_en, width=wrap_width)
         bbox = draw.multiline_textbbox((0, 0), wrapped, font=font_title, align="center")
