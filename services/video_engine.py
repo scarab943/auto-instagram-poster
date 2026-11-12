@@ -14,20 +14,43 @@ class VideoEngine:
     def download_video(self, video_id):
         output_tpl = str(self.tmp_dir / f"{video_id}.%(ext)s")
         cookies_path = self.tmp_dir / "cookies.txt"
-        if Config.YOUTUBE_COOKIES: cookies_path.write_text(Config.YOUTUBE_COOKIES, encoding="utf-8")
-        base_args = ["--proxy", Config.WARP_PROXY, "--no-check-certificates", "--merge-output-format", "mp4", "-o", output_tpl, "--no-warnings", "--retries", "3", "--fragment-retries", "5", "--concurrent-fragments", "4", "--socket-timeout", "30", "--extractor-retries", "3", "--extractor-args", f"youtube:player_client=android_vr,web_embedded;youtubepot-bgutilhttp:base_url={Config.PO_TOKEN_PROVIDER_URL}"]
+        if Config.YOUTUBE_COOKIES: 
+            cookies_path.write_text(Config.YOUTUBE_COOKIES, encoding="utf-8")
+            
+        # تغییر کلاینت‌ها به android, ios و web برای شانس بیشتر
+        base_args = [
+            "--proxy", Config.WARP_PROXY, 
+            "--no-check-certificates", 
+            "--merge-output-format", "mp4", 
+            "-o", output_tpl, 
+            "--no-warnings", 
+            "--retries", "3", 
+            "--fragment-retries", "5", 
+            "--concurrent-fragments", "4", 
+            "--socket-timeout", "30", 
+            "--extractor-retries", "3", 
+            "--extractor-args", f"youtube:player_client=android,ios,web;youtubepot-bgutilhttp:base_url={Config.PO_TOKEN_PROVIDER_URL}"
+        ]
+        
         if shutil.which("deno"): base_args.extend(["--js-runtimes", "deno"])
         elif shutil.which("node"): base_args.extend(["--js-runtimes", "node"])
         if cookies_path.exists(): base_args.extend(["--cookies", str(cookies_path)])
+        
         for fmt in ["best[ext=mp4]/best", "18/22/17/36", "bv*+ba/b", "worst"]:
             cmd = ["yt-dlp", "-f", fmt] + base_args + [f"https://www.youtube.com/watch?v={video_id}"]
             try:
                 r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
                 if r.returncode == 0:
                     for f in self.tmp_dir.glob(f"{video_id}.*"):
-                        if f.suffix in (".mp4", ".mkv", ".webm"): return str(f)
-            except Exception: pass
-        raise RuntimeError("Download failed.")
+                        if f.suffix in (".mp4", ".mkv", ".webm"): 
+                            return str(f)
+                else:
+                    # 🌟 چاپ خطای واقعی یوتوب در لاگ‌ها
+                    log.error(f"⚠️ yt-dlp failed for format {fmt}. Error:\n{r.stderr[:800]}")
+            except Exception as e:
+                log.error(f"⚠️ yt-dlp exception for format {fmt}: {e}")
+                
+        raise RuntimeError("Download failed across all formats. Check logs above for details.")
 
     def extract_and_transcribe(self, video_path):
         audio_path = str(self.tmp_dir / "audio.wav")
@@ -43,7 +66,8 @@ class VideoEngine:
         style = "FontName=Vazir,FontSize=52,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,Bold=1,BorderStyle=1,Outline=3,Shadow=0,MarginV=140,MarginL=60,MarginR=60,Alignment=2"
         filter_complex = (f"[0:v]split=2[orig1][orig2];[orig1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:3[bg];[orig2]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[vid];[vid]subtitles={srt_escaped}:force_style='{style}'[vout]")
         result = subprocess.run(["ffmpeg", "-y", "-i", video_path, "-filter_complex", filter_complex, "-map", "[vout]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output_path], capture_output=True, timeout=1800)
-        if result.returncode != 0: raise RuntimeError(f"ffmpeg failed.")
+        if result.returncode != 0: 
+            raise RuntimeError(f"ffmpeg failed: {result.stderr.decode()[-500:]}")
         gc.collect()
         return output_path
 
