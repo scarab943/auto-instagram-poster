@@ -70,13 +70,14 @@ jobs:
           python-version: '3.11'
           cache: pip
 
-      - name: Install system deps (Fonts, Deno, Unzip)
+      - name: Install system deps (FFmpeg, Fonts, Deno, Unzip)
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           # تنظیم تایم اوت برای جلوگیری از گیر کردن سرور
           sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update -qq || true
-          sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y -qq fontconfig curl unzip || true
+          # نصب FFmpeg و بقیه نیازمندی‌ها
+          sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y -qq ffmpeg fontconfig curl unzip || true
           
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
