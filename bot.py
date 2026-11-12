@@ -91,10 +91,9 @@ class BotOrchestrator:
                 capture_output=True, text=True
             ).stdout.strip())
 
-            # 3. محاسبه دقیق پارتیشن‌ها (🌟 فیکس شدن باگ NameError)
+            # 3. محاسبه دقیق پارتیشن‌ها
             num_parts = existing_total_parts 
             
-            # اگر تعداد پارتیشن‌ها صفر بود (ویدیوی جدید) یا زمان ویدیو تغییر کرده بود
             if num_parts <= 0 or (existing_source_duration > 0 and abs(duration - existing_source_duration) / max(existing_source_duration, 1) > 0.05):
                 num_parts = max(1, int(duration // Config.MAX_SEGMENT_DURATION) + (1 if duration % Config.MAX_SEGMENT_DURATION > 0 else 0))
                 state["total_parts"] = num_parts
@@ -117,13 +116,11 @@ class BotOrchestrator:
                 part_start = i * Config.MAX_SEGMENT_DURATION
                 part_end = min((i + 1) * Config.MAX_SEGMENT_DURATION, duration)
                 
-                # اعمال همپوشانی (Overlap)
                 if i > 0: 
                     part_start = max(0, part_start - Config.OVERLAP_SECONDS)
                     
                 part_len = part_end - part_start
                 
-                # اگر پارت آخر خیلی کوتاه بود (زیر ۱۰ ثانیه)، نادیده بگیر
                 if part_len < 10 and p_num == num_parts: 
                     break
 
@@ -131,12 +128,12 @@ class BotOrchestrator:
                 final_path = str(self.tmp_dir / f"final_{p_num}.mp4")
                 thumb_path = str(self.tmp_dir / f"thumb_{p_num}.jpg")
 
-                # 6. استخراج متن و تولید کپشن با AI
+                # 6. استخراج متن و تولید کپشن با AI (بدون تگ HTML برای اینستاگرام)
                 part_text = " ".join([s["text"] for s in trans_segments if s["end"] > part_start and s["start"] < part_end])
                 gemini_data = self.gemini.generate_light_post_data(video["title"], part_text)
                 
                 caption = (
-                    f"🎬 <b>{html.escape(title_fa)}</b>\n\n{html.escape(gemini_data['summary_fa'])}\n\n"
+                    f"🎬 {title_fa}\n\n{gemini_data['summary_fa']}\n\n"
                     f"{Config.FIXED_HASHTAGS_FA} {Config.FIXED_HASHTAGS_EN} {gemini_data['hashtag_fa']}"
                 )
 
@@ -185,9 +182,9 @@ class BotOrchestrator:
                     TelegramClient.send_text(f"❌ خطا در پست قسمت {p_num} در اینستاگرام.")
 
                 if p_num != parts_to_process[-1]: 
-                    time.sleep(30) # فاصله ایمن بین دو پست
+                    time.sleep(30)
 
-            # 11. به‌روزرسانی State برای ویدیوی بعدی
+            # 11. به‌روزرسانی State
             if state["current_part"] > state["total_parts"] and not Config.DRY_RUN:
                 state["queue_index"] += 1
                 state["current_part"] = 1
