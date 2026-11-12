@@ -22,14 +22,13 @@ class GeminiService:
 
         prompt = f"""You are an expert Instagram manager.
 Based on this title: "{video_title_en}" and this text: "{part_text[:500]}", provide:
-1. "cover_title_en": A very short, catchy English title (max 5 words).
+1. "cover_title_en": A VERY SHORT English title (MAXIMUM 5 words). MUST BE IN ENGLISH ONLY. DO NOT USE PERSIAN.
 2. "summary_fa": A short 1-2 line engaging Persian summary.
 3. "hashtag_fa": Exactly 1 relevant Persian hashtag starting with #.
-Return ONLY a JSON object with these 3 keys."""
+Return ONLY a valid JSON object with these 3 keys."""
 
         try:
             response = client.models.generate_content(model="gemini-3.8-flash", contents=prompt)
-            # پاکسازی خروجی برای گرفتن JSON خالص
             text = response.text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
             data = json.loads(text)
             return {
@@ -39,5 +38,4 @@ Return ONLY a JSON object with these 3 keys."""
             }
         except Exception as e:
             log.warning(f"Gemini error: {e}")
-            time.sleep(1)
             return fallback
