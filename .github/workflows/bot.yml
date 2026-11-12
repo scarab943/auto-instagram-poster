@@ -74,11 +74,8 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
-          # تنظیم تایم اوت برای جلوگیری از گیر کردن سرور
           sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update -qq || true
-          # نصب FFmpeg و بقیه نیازمندی‌ها
           sudo apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y -qq ffmpeg fontconfig curl unzip || true
-          
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> "$GITHUB_PATH"
 
@@ -89,11 +86,11 @@ jobs:
 
       - name: Install Vazir font
         run: |
-          wget -q https://github.com/rastikerdar/vazir-font/releases/download/v30.1.0/vazir-font-v30.1.0.zip -O /tmp/vazir.zip
-          unzip -q /tmp/vazir.zip -d /tmp/vazir
           mkdir -p ~/.fonts
-          find /tmp/vazir -name "*.ttf" -exec cp {} ~/.fonts/ \;
-          fc-cache -f
+          # دانلود مستقیم فونت‌ها بدون فایل زیپ
+          curl -fsSL -o ~/.fonts/Vazir-Regular.ttf https://github.com/rastikerdar/vazir-font/raw/master/dist/Vazir-Regular.ttf
+          curl -fsSL -o ~/.fonts/Vazir-Bold.ttf https://github.com/rastikerdar/vazir-font/raw/master/dist/Vazir-Bold.ttf
+          fc-cache -f ~/.fonts
 
       - name: Setup WARP proxy (soft-fail)
         continue-on-error: true
