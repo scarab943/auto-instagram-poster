@@ -13,7 +13,7 @@ on:
         description: 'Parts per run (تعداد پست در هر اجرا)'
         type: choice
         options: ['1', '2']
-        default: '2'
+        default: '1'
 
 concurrency:
   group: auto-video-bot
@@ -39,7 +39,7 @@ jobs:
       WARP_PROXY:            socks5://127.0.0.1:40000
       PO_TOKEN_PROVIDER_URL: http://127.0.0.1:4416
       DRY_RUN:               ${{ github.event.inputs.dry_run || 'false' }}
-      PARTS_PER_RUN:         ${{ github.event.inputs.parts_per_run || '2' }}
+      PARTS_PER_RUN:         ${{ github.event.inputs.parts_per_run || '1' }}
       GITHUB_ACTIONS:        "true"
       HF_HOME:               ${{ github.workspace }}/.hf-cache
       PYTHONUNBUFFERED:      "1"
@@ -87,9 +87,10 @@ jobs:
       - name: Install Vazir font
         run: |
           mkdir -p ~/.fonts
-          # دانلود مستقیم فونت‌ها بدون فایل زیپ
-          curl -fsSL -o ~/.fonts/Vazir-Regular.ttf https://github.com/rastikerdar/vazir-font/raw/master/dist/Vazir-Regular.ttf
-          curl -fsSL -o ~/.fonts/Vazir-Bold.ttf https://github.com/rastikerdar/vazir-font/raw/master/dist/Vazir-Bold.ttf
+          # 🌟 استفاده از لینک زیپ مطمئن برای دانلود فونت
+          wget -q https://github.com/rastikerdar/vazir-font/releases/download/v30.1.0/vazir-font-v30.1.0.zip -O /tmp/vazir.zip
+          unzip -q /tmp/vazir.zip -d /tmp/vazir
+          find /tmp/vazir -name "*.ttf" -exec cp {} ~/.fonts/ \;
           fc-cache -f ~/.fonts
 
       - name: Setup WARP proxy (soft-fail)
