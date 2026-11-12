@@ -17,7 +17,6 @@ class VideoEngine:
         if Config.YOUTUBE_COOKIES: 
             cookies_path.write_text(Config.YOUTUBE_COOKIES, encoding="utf-8")
             
-        # تغییر کلاینت‌ها به android, ios و web برای شانس بیشتر
         base_args = [
             "--proxy", Config.WARP_PROXY, 
             "--no-check-certificates", 
@@ -44,13 +43,10 @@ class VideoEngine:
                     for f in self.tmp_dir.glob(f"{video_id}.*"):
                         if f.suffix in (".mp4", ".mkv", ".webm"): 
                             return str(f)
-                else:
-                    # 🌟 چاپ خطای واقعی یوتوب در لاگ‌ها
-                    log.error(f"⚠️ yt-dlp failed for format {fmt}. Error:\n{r.stderr[:800]}")
             except Exception as e:
-                log.error(f"⚠️ yt-dlp exception for format {fmt}: {e}")
+                log.error(f"⚠️ yt-dlp exception: {e}")
                 
-        raise RuntimeError("Download failed across all formats. Check logs above for details.")
+        raise RuntimeError("Download failed across all formats.")
 
     def extract_and_transcribe(self, video_path):
         audio_path = str(self.tmp_dir / "audio.wav")
@@ -63,8 +59,12 @@ class VideoEngine:
     def process_full_video(self, video_path, full_srt_path):
         output_path = str(self.tmp_dir / "full_subtitled.mp4")
         srt_escaped = full_srt_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-        style = "FontName=Vazir,FontSize=52,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000,Bold=1,BorderStyle=1,Outline=3,Shadow=0,MarginV=140,MarginL=60,MarginR=60,Alignment=2"
-        filter_complex = (f"[0:v]split=2[orig1][orig2];[orig1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:3[bg];[orig2]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[vid];[vid]subtitles={srt_escaped}:force_style='{style}'[vout]")
+        
+        # 🌟 تنظیمات دقیق قبلی (سایز ۱۴، باکس مشکی)
+        style = "FontName=Vazir,FontSize=14,PrimaryColour=&H0000FFFF,OutlineColour=&H80000000,BorderStyle=3,BackColour=&H80000000,Outline=1,Shadow=0,MarginV=40,Alignment=2"
+        
+        filter_complex = (f"[0:v]split=2[orig1][orig2];[orig1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:3[bg];[orig2]scale=1080:1920:force_original_aspect_ratio=decrease[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2[vid];[vid]subtitles={srt_escaped}:fontsdir=/home/runner/.fonts:force_style='{style}'[vout]")
+        
         result = subprocess.run(["ffmpeg", "-y", "-i", video_path, "-filter_complex", filter_complex, "-map", "[vout]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output_path], capture_output=True, timeout=1800)
         if result.returncode != 0: 
             raise RuntimeError(f"ffmpeg failed: {result.stderr.decode()[-500:]}")
