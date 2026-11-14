@@ -17,23 +17,26 @@ def create_masterpiece_cover(best_cover_frame, cover_title_en, part_num, total_p
         img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
         draw = ImageDraw.Draw(img)
 
-        # 🌟 پیدا کردن هوشمند هر فونت وزیری که توی پوشه باشه
-        font_file = None
-        font_dir = os.path.expanduser("~/.fonts")
-        if os.path.isdir(font_dir):
-            font_files = glob.glob(os.path.join(font_dir, "*.ttf"))
-            if font_files:
-                font_file = font_files[0] # اولین فونت وزیر رو بردار
-
-        if not font_file:
-            font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        # 🌟 مسیر دقیق فونت در گیت‌هاب
+        font_file = "/home/runner/.fonts/Vazir-Bold.ttf"
+        if not os.path.exists(font_file):
+            # اگر به هر دلیلی پیدا نشد، هر فونت وزیر دیگه‌ای رو پیدا کن
+            fonts = glob.glob(os.path.expanduser("~/.fonts/*.ttf"))
+            if fonts:
+                font_file = fonts[0]
+            else:
+                # آخرین راه حل: فونت دیفالت
+                font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        
+        log.info(f"Using font for cover: {font_file}")
 
         font_size, wrap_width = (int(1080 * 0.06), 22) if len(cover_title_en) > 25 else (int(1080 * 0.09), 14)
         
         try:
             font_title = ImageFont.truetype(font_file, font_size)
             font_badge = ImageFont.truetype(font_file, int(1080 * 0.09))
-        except:
+        except Exception as e:
+            log.error(f"Font load error: {e}")
             font_title = ImageFont.load_default()
             font_badge = ImageFont.load_default()
 
