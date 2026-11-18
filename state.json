@@ -343,11 +343,11 @@
   ],
   "queue_index": 48,
   "stats": {
-    "success": 110,
+    "success": 111,
     "failed": 14
   },
-  "current_part": 1,
-  "total_parts": 0,
-  "source_duration": 0,
+  "current_part": 2,
+  "total_parts": 3,
+  "source_duration": 437.4,
   "checkpoint_step": "rendering"
 }
