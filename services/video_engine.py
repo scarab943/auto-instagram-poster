@@ -10,7 +10,6 @@ log = logging.getLogger(__name__)
 class VideoEngine:
     def __init__(self, tmp_dir):
         self.tmp_dir = tmp_dir
-        # لود مدل ویشپر
         self.whisper_model = WhisperModel("small.en", device="cpu", compute_type="int8")
 
     def download_video(self, video_id):
@@ -20,7 +19,6 @@ class VideoEngine:
         if Config.YOUTUBE_COOKIES: 
             cookies_path.write_text(Config.YOUTUBE_COOKIES, encoding="utf-8")
             
-        # آرگومان‌های پایه برای دور زدن محدودیت‌های یوتوب
         base_args = [
             "--proxy", Config.WARP_PROXY, 
             "--no-check-certificates", 
@@ -43,7 +41,6 @@ class VideoEngine:
         if cookies_path.exists(): 
             base_args.extend(["--cookies", str(cookies_path)])
         
-        # تلاش برای دانلود با فرمت‌های مختلف
         for fmt in ["best[ext=mp4]/best", "18/22/17/36", "bv*+ba/b", "worst"]:
             cmd = ["yt-dlp", "-f", fmt] + base_args + [f"https://www.youtube.com/watch?v={video_id}"]
             try:
@@ -56,7 +53,6 @@ class VideoEngine:
                             log.info(f"✅ Download successful: {f.name}")
                             return str(f)
                 else:
-                    # 🌟 چاپ خطای دقیق yt-dlp برای اینکه بفهمیم یوتوب چی میگه
                     log.error(f"❌ yt-dlp failed for format {fmt}. Return code: {r.returncode}")
                     if r.stderr:
                         log.error(f"Error output:\n{r.stderr[:1000]}")
@@ -86,27 +82,38 @@ class VideoEngine:
         return res
 
     def process_full_video(self, video_path, full_srt_path):
-        log.info("Rendering subtitles on video...")
+        log.info("Rendering video...")
         output_path = str(self.tmp_dir / "full_subtitled.mp4")
-        srt_escaped = full_srt_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
         
-        # تنظیمات طلایی زیرنویس (سایز ۱۴، باکس مشکی)
-        style = "FontName=Vazir,FontSize=14,PrimaryColour=&H0000FFFF,OutlineColour=&H80000000,BorderStyle=3,BackColour=&H80000000,Outline=1,Shadow=0,MarginV=40,Alignment=2"
+        # 🌟 بررسی اینکه آیا فایل زیرنویس وجود دارد و خالی نیست
+        has_subtitles = os.path.exists(full_srt_path) and os.path.getsize(full_srt_path) > 0
         
-        filter_complex = (
+        # فیلتر پایه برای بلور کردن پس‌زمینه
+        base_filter = (
             f"[0:v]split=2[orig1][orig2];"
             f"[orig1]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:3[bg];"
             f"[orig2]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[vid];"
-            f"[vid]subtitles={srt_escaped}:fontsdir=/home/runner/.fonts:force_style='{style}'[vout]"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2[vid]"
         )
-        
+
+        if has_subtitles:
+            log.info("✅ Subtitle file is valid. Rendering WITH subtitles...")
+            srt_escaped = full_srt_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+            style = "FontName=Vazir,FontSize=14,PrimaryColour=&H0000FFFF,OutlineColour=&H80000000,BorderStyle=3,BackColour=&H80000000,Outline=1,Shadow=0,MarginV=40,Alignment=2"
+            
+            filter_complex = f"{base_filter};[vid]subtitles={srt_escaped}:fontsdir=/home/runner/.fonts:force_style='{style}'[vout]"
+        else:
+            log.warning("⚠️ Subtitle file is empty or missing. Rendering WITHOUT subtitles...")
+            filter_complex = f"{base_filter};[vid]copy[vout]"
+
         result = subprocess.run(
             ["ffmpeg", "-y", "-i", video_path, "-filter_complex", filter_complex, "-map", "[vout]", "-map", "0:a:0?", "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", output_path], 
             capture_output=True, timeout=1800
         )
+        
         if result.returncode != 0: 
             raise RuntimeError(f"ffmpeg failed: {result.stderr.decode()[-500:]}")
+            
         gc.collect()
         return output_path
 
