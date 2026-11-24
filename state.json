@@ -341,13 +341,13 @@
       "duration": 419.0
     }
   ],
-  "queue_index": 51,
+  "queue_index": 52,
   "stats": {
-    "success": 121,
+    "success": 122,
     "failed": 24
   },
-  "current_part": 2,
-  "total_parts": 2,
-  "source_duration": 233.3,
+  "current_part": 1,
+  "total_parts": 0,
+  "source_duration": 0,
   "checkpoint_step": "rendering"
 }
