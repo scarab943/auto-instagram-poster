@@ -36,26 +36,68 @@ class BotOrchestrator:
         log.info("Starting Auto Video Bot...")
         state = self.state_manager.load()
 
-        if not state["queue"]:
+        # 🌟 بررسی لینک ویدیوی خاص
+        if Config.CUSTOM_VIDEO_URL:
+            log.info(f"Custom video URL provided: {Config.CUSTOM_VIDEO_URL}")
             try:
-                res = subprocess.run(["yt-dlp", "--flat-playlist", "--playlist-reverse", "--print", "%(id)s|%(title)s|%(duration)s", Config.YOUTUBE_CHANNEL_URL], capture_output=True, text=True, timeout=600, check=True)
-                for line in res.stdout.strip().split("\n"):
-                    if "|" in line:
-                        p = line.split("|", 2)
-                        if len(p) == 3 and p[0]:
-                            dur = float(p[2]) if p[2] not in ("NA", "None", "") else 0
-                            state["queue"].append({"id": p[0], "title": p[1], "duration": dur})
+                res = subprocess.run(
+                    ["yt-dlp", "--print", "%(id)s|%(title)s|%(duration)s", Config.CUSTOM_VIDEO_URL], 
+                    capture_output=True, text=True, check=True
+                )
+                parts = res.stdout.strip().split("|")
+                if len(parts) == 3:
+                    state["custom_video"] = {
+                        "id": parts[0], "title": parts[1],
+                        "duration": float(parts[2]) if parts[2] not in ("NA", "None", "") else 0,
+                        "current_part": 1, "total_parts": 0, "source_duration": 0
+                    }
+                    self.state_manager.save(state)
+                    log.info(f"✅ Custom video set in state: {parts[1]}")
             except Exception as e:
-                log.error(f"Failed fetching channel videos: {e}")
-                return
-            self.state_manager.save(state)
+                log.error(f"Failed to fetch custom video info: {e}")
 
-        if state["queue_index"] >= len(state["queue"]): return
+        is_custom = False
+        if state.get("custom_video") and state["custom_video"].get("current_part", 1) <= state["custom_video"].get("total_parts", 1):
+            video = state["custom_video"]
+            target_part = video.get("current_part", 1)
+            existing_total_parts = video.get("total_parts", 0)
+            existing_source_duration = video.get("source_duration", 0)
+            is_custom = True
+            log.info(f"🎯 Processing CUSTOM video: {video['title']}")
+        else:
+            if is_custom or (state.get("custom_video") and state["custom_video"]["current_part"] > state["custom_video"]["total_parts"]):
+                log.info("✅ Custom video completely processed. Clearing from state...")
+                state["custom_video"] = None
+                self.state_manager.save(state)
 
-        video = state["queue"][state["queue_index"]]
-        target_part = state.get("current_part", 1)
-        existing_total_parts = state.get("total_parts", 0)
-        existing_source_duration = state.get("source_duration", 0)
+            if Config.VIDEO_INDEX and Config.VIDEO_INDEX.isdigit():
+                idx = int(Config.VIDEO_INDEX)
+                if idx < len(state["queue"]):
+                    state["queue_index"] = idx
+                    state["current_part"] = 1
+                    state["total_parts"] = 0
+
+            if not state["queue"]:
+                try:
+                    res = subprocess.run(["yt-dlp", "--flat-playlist", "--playlist-reverse", "--print", "%(id)s|%(title)s|%(duration)s", Config.YOUTUBE_CHANNEL_URL], capture_output=True, text=True, timeout=600, check=True)
+                    for line in res.stdout.strip().split("\n"):
+                        if "|" in line:
+                            p = line.split("|", 2)
+                            if len(p) == 3 and p[0]:
+                                dur = float(p[2]) if p[2] not in ("NA", "None", "") else 0
+                                state["queue"].append({"id": p[0], "title": p[1], "duration": dur})
+                except Exception as e:
+                    log.error(f"Failed fetching channel videos: {e}")
+                    return
+                self.state_manager.save(state)
+
+            if state["queue_index"] >= len(state["queue"]): return
+
+            video = state["queue"][state["queue_index"]]
+            target_part = state.get("current_part", 1)
+            existing_total_parts = state.get("total_parts", 0)
+            existing_source_duration = state.get("source_duration", 0)
+            log.info(f"📋 Processing QUEUE video (Index {state['queue_index']}): {video['title']}")
 
         try:
             title_fa = self.translator.translate_text(video["title"])
@@ -74,9 +116,14 @@ class BotOrchestrator:
             num_parts = existing_total_parts 
             if num_parts <= 0 or (existing_source_duration > 0 and abs(duration - existing_source_duration) / max(existing_source_duration, 1) > 0.05):
                 num_parts = max(1, int(duration // Config.MAX_SEGMENT_DURATION) + (1 if duration % Config.MAX_SEGMENT_DURATION > 0 else 0))
-                state["total_parts"] = num_parts
-                state["current_part"] = 1
-                state["source_duration"] = round(duration, 1)
+                if is_custom:
+                    state["custom_video"]["total_parts"] = num_parts
+                    state["custom_video"]["current_part"] = 1
+                    state["custom_video"]["source_duration"] = round(duration, 1)
+                else:
+                    state["total_parts"] = num_parts
+                    state["current_part"] = 1
+                    state["source_duration"] = round(duration, 1)
                 target_part = 1
 
             best_intro_frame = self.video_engine.get_best_frame(processed_video)
@@ -98,16 +145,26 @@ class BotOrchestrator:
                 thumb_path = str(self.tmp_dir / f"thumb_{p_num}.jpg")
 
                 part_text = " ".join([s["text"] for s in trans_segments if s["end"] > part_start and s["start"] < part_end])
+                
+                # 🌟 همیشه از هوش مصنوعی عنوان کاور رو می‌گیریم (حتی اگر کپشن دستی باشه)
                 gemini_data = self.gemini.generate_light_post_data(video["title"], part_text)
                 
-                # 🌟 بدون تگ <b> برای اینستاگرام
-                caption = (
-                    f"🎬 {title_fa}\n\n{gemini_data['summary_fa']}\n\n"
-                    f"{Config.FIXED_HASHTAGS_FA} {Config.FIXED_HASHTAGS_EN} {gemini_data['hashtag_fa']}"
-                )
+                # 🌟 منطق جدید: کپشن و هشتگ سفارشی در اولویت هستند
+                if Config.CUSTOM_CAPTION:
+                    final_caption_text = Config.CUSTOM_CAPTION
+                else:
+                    final_caption_text = f"🎬 {title_fa}\n\n{gemini_data['summary_fa']}"
+                    
+                if Config.CUSTOM_HASHTAGS:
+                    final_hashtags = Config.CUSTOM_HASHTAGS
+                else:
+                    final_hashtags = f"{Config.FIXED_HASHTAGS_FA} {Config.FIXED_HASHTAGS_EN} {gemini_data['hashtag_fa']}"
+                    
+                caption = f"{final_caption_text}\n\n{final_hashtags}"
 
                 subprocess.run(["ffmpeg", "-y", "-ss", str(part_start), "-i", processed_video, "-t", str(part_len), "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", "-r", "30", "-movflags", "+faststart", raw_path], check=True, capture_output=True)
 
+                # 🌟 کاور همیشه ساخته میشه (با عنوان هوش مصنوعی)
                 create_masterpiece_cover(best_cover_frame, gemini_data["cover_title_en"], p_num, num_parts, thumb_path)
 
                 intro_path = str(self.tmp_dir / "intro.mp4")
@@ -124,7 +181,10 @@ class BotOrchestrator:
                 
                 if success and not Config.DRY_RUN:
                     state["stats"]["success"] += 1
-                    state["current_part"] = p_num + 1
+                    if is_custom:
+                        state["custom_video"]["current_part"] = p_num + 1
+                    else:
+                        state["current_part"] = p_num + 1
                     self.state_manager.save(state)
                     TelegramClient.send_text(f"✅ قسمت {p_num} با موفقیت در اینستاگرام پست شد.")
                 else:
@@ -132,12 +192,16 @@ class BotOrchestrator:
 
                 if p_num != parts_to_process[-1]: time.sleep(30)
 
-            if state["current_part"] > state["total_parts"] and not Config.DRY_RUN:
-                state["queue_index"] += 1
-                state["current_part"] = 1
-                state["total_parts"] = 0
-                state["source_duration"] = 0
-                self.state_manager.save(state)
+            if is_custom:
+                if state["custom_video"]["current_part"] > state["custom_video"]["total_parts"] and not Config.DRY_RUN:
+                    log.info("✅ Custom video completely finished! Will return to main queue next run.")
+            else:
+                if state["current_part"] > state["total_parts"] and not Config.DRY_RUN:
+                    state["queue_index"] += 1
+                    state["current_part"] = 1
+                    state["total_parts"] = 0
+                    state["source_duration"] = 0
+                    self.state_manager.save(state)
 
         except Exception as e:
             log.exception("Error in execution:")
