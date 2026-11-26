@@ -5,15 +5,41 @@ on:
     - cron: '0 */6 * * *' # هر ۶ ساعت
   workflow_dispatch:
     inputs:
+      bot_status:
+        description: 'وضعیت ربات (فعال / متوقف)'
+        type: choice
+        options: ['فعال', 'متوقف']
+        default: 'فعال'
       dry_run:
-        description: 'DRY_RUN mode (تست بدون پست در اینستاگرام)'
+        description: 'حالت تست (بدون پست کردن در اینستاگرام)'
         type: boolean
         default: false
       parts_per_run:
-        description: 'Parts per run (تعداد پست در هر اجرا)'
+        description: 'تعداد پست در هر بار اجرا'
         type: choice
-        options: ['1', '2']
-        default: '1'
+        options: ['1', '2', '3', '4']
+        default: '2'
+      whisper_model:
+        description: 'مدل تبدیل صدا به متن (Whisper)'
+        type: choice
+        options: ['small.en', 'medium.en']
+        default: 'small.en'
+      video_url:
+        description: 'لینک ویدیوی خاص (اختیاری - برای پردازش ویدیوی خارج از صف)'
+        type: string
+        required: false
+      video_index:
+        description: 'شماره ویدیو در صف اصلی (اختیاری)'
+        type: string
+        required: false
+      custom_caption:
+        description: 'کپشن دلخواه (اختیاری - خالی بگذارید تا هوش مصنوعی بنویسد)'
+        type: string
+        required: false
+      custom_hashtags:
+        description: 'هشتگ‌های دلخواه با فاصله (اختیاری)'
+        type: string
+        required: false
 
 concurrency:
   group: auto-video-bot
@@ -38,8 +64,16 @@ jobs:
       YOUTUBE_COOKIES:       ${{ secrets.YOUTUBE_COOKIES }}
       WARP_PROXY:            socks5://127.0.0.1:40000
       PO_TOKEN_PROVIDER_URL: http://127.0.0.1:4416
+      
+      BOT_STATUS:            ${{ github.event.inputs.bot_status || 'فعال' }}
       DRY_RUN:               ${{ github.event.inputs.dry_run || 'false' }}
-      PARTS_PER_RUN:         ${{ github.event.inputs.parts_per_run || '1' }}
+      PARTS_PER_RUN:         ${{ github.event.inputs.parts_per_run || '2' }}
+      WHISPER_MODEL:         ${{ github.event.inputs.whisper_model || 'small.en' }}
+      CUSTOM_VIDEO_URL:      ${{ github.event.inputs.video_url }}
+      VIDEO_INDEX:           ${{ github.event.inputs.video_index }}
+      CUSTOM_CAPTION:        ${{ github.event.inputs.custom_caption }}
+      CUSTOM_HASHTAGS:       ${{ github.event.inputs.custom_hashtags }}
+      
       GITHUB_ACTIONS:        "true"
       HF_HOME:               ${{ github.workspace }}/.hf-cache
       PYTHONUNBUFFERED:      "1"
@@ -56,7 +90,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .hf-cache
-          key: hf-whisper-small-en-v1
+          key: hf-whisper-${{ github.event.inputs.whisper_model || 'small.en' }}-v1
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -87,7 +121,6 @@ jobs:
       - name: Install Vazir font
         run: |
           mkdir -p ~/.fonts
-          # 🌟 استفاده از لینک زیپ مطمئن برای دانلود فونت
           wget -q https://github.com/rastikerdar/vazir-font/releases/download/v30.1.0/vazir-font-v30.1.0.zip -O /tmp/vazir.zip
           unzip -q /tmp/vazir.zip -d /tmp/vazir
           find /tmp/vazir -name "*.ttf" -exec cp {} ~/.fonts/ \;
