@@ -36,6 +36,22 @@ class BotOrchestrator:
         log.info("Starting Auto Video Bot...")
         state = self.state_manager.load()
 
+        # 🌟 بررسی دستور توقف/فعال‌سازی از منوی گیت‌هاب
+        if Config.BOT_STATUS == "متوقف":
+            state["is_paused"] = True
+            self.state_manager.save(state)
+            log.info("⏸️ وضعیت ربات به 'متوقف' تغییر کرد. ربات خاموش می‌شود.")
+            return
+        elif Config.BOT_STATUS == "فعال":
+            state["is_paused"] = False
+            self.state_manager.save(state)
+            log.info("▶️ وضعیت ربات به 'فعال' تغییر کرد. شروع پردازش...")
+            
+        # 🌟 اگر ربات قبلاً متوقف شده بود (توسط کرون‌جاب چک می‌شود)
+        if state.get("is_paused", False):
+            log.info("⏸️ ربات در حالت توقف است. هیچ پستی ارسال نمی‌شود.")
+            return
+
         # 🌟 بررسی لینک ویدیوی خاص
         if Config.CUSTOM_VIDEO_URL:
             log.info(f"Custom video URL provided: {Config.CUSTOM_VIDEO_URL}")
@@ -133,6 +149,9 @@ class BotOrchestrator:
             if not parts_to_process: return
 
             for p_num in parts_to_process:
+                # چک مجدد برای اینکه اگر وسط کار متوقف شد، ادامه نده
+                if Config.BOT_STATUS == "متوقف": break
+
                 i = p_num - 1
                 part_start = i * Config.MAX_SEGMENT_DURATION
                 part_end = min((i + 1) * Config.MAX_SEGMENT_DURATION, duration)
@@ -146,10 +165,8 @@ class BotOrchestrator:
 
                 part_text = " ".join([s["text"] for s in trans_segments if s["end"] > part_start and s["start"] < part_end])
                 
-                # 🌟 همیشه از هوش مصنوعی عنوان کاور رو می‌گیریم (حتی اگر کپشن دستی باشه)
                 gemini_data = self.gemini.generate_light_post_data(video["title"], part_text)
                 
-                # 🌟 منطق جدید: کپشن و هشتگ سفارشی در اولویت هستند
                 if Config.CUSTOM_CAPTION:
                     final_caption_text = Config.CUSTOM_CAPTION
                 else:
@@ -164,7 +181,6 @@ class BotOrchestrator:
 
                 subprocess.run(["ffmpeg", "-y", "-ss", str(part_start), "-i", processed_video, "-t", str(part_len), "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", "-b:a", "128k", "-r", "30", "-movflags", "+faststart", raw_path], check=True, capture_output=True)
 
-                # 🌟 کاور همیشه ساخته میشه (با عنوان هوش مصنوعی)
                 create_masterpiece_cover(best_cover_frame, gemini_data["cover_title_en"], p_num, num_parts, thumb_path)
 
                 intro_path = str(self.tmp_dir / "intro.mp4")
