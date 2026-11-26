@@ -16,7 +16,13 @@ class GeminiService:
         return client
 
     def generate_light_post_data(self, video_title_en, part_text):
-        fallback = {"cover_title_en": " ".join(video_title_en.split()[:5]), "summary_fa": part_text[:100] + "...", "hashtag_fa": "#داستان_انگیزشی"}
+        # 🌟 کپشن جایگزین بسیار زیباتر (اگر جمینای خطا داد)
+        fallback = {
+            "cover_title_en": " ".join(video_title_en.split()[:5]), 
+            "summary_fa": "داستانی کوتاه و تاثیرگذار که دیدگاه شما را به زندگی تغییر خواهد داد. پیشنهاد می‌کنیم تا انتها تماشا کنید...", 
+            "hashtag_fa": "#داستان_انگیزشی"
+        }
+        
         client = self._get_client()
         if not client: return fallback
 
@@ -33,10 +39,7 @@ Return ONLY a valid JSON object with these 3 keys."""
             data = json.loads(text)
             
             cover_title = data.get("cover_title_en", fallback["cover_title_en"])
-            
-            # 🌟 چک کردن اینکه هوش مصنوعی متن فارسی به کاور نداده باشه
             if re.search(r'[\u0600-\u06FF]', cover_title):
-                log.warning("AI returned Persian text for cover_title_en. Using English fallback.")
                 cover_title = fallback["cover_title_en"]
                 
             return {
