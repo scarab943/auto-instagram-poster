@@ -5,6 +5,7 @@ import logging
 log = logging.getLogger(__name__)
 
 def create_masterpiece_cover(best_cover_frame, cover_title_en, part_num, total_parts, output_path):
+    # ⚠️ دست نزدم (همون کد درست قبلی)
     try:
         bg = Image.open(best_cover_frame).convert("RGB").resize((1080, 1920), Image.LANCZOS).filter(ImageFilter.GaussianBlur(25))
         fg = Image.open(best_cover_frame).convert("RGB")
@@ -17,26 +18,17 @@ def create_masterpiece_cover(best_cover_frame, cover_title_en, part_num, total_p
         img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
         draw = ImageDraw.Draw(img)
 
-        # 🌟 مسیر دقیق فونت در گیت‌هاب
         font_file = "/home/runner/.fonts/Vazir-Bold.ttf"
         if not os.path.exists(font_file):
-            # اگر به هر دلیلی پیدا نشد، هر فونت وزیر دیگه‌ای رو پیدا کن
             fonts = glob.glob(os.path.expanduser("~/.fonts/*.ttf"))
-            if fonts:
-                font_file = fonts[0]
-            else:
-                # آخرین راه حل: فونت دیفالت
-                font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        
-        log.info(f"Using font for cover: {font_file}")
+            if fonts: font_file = fonts[0]
+            else: font_file = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
         font_size, wrap_width = (int(1080 * 0.06), 22) if len(cover_title_en) > 25 else (int(1080 * 0.09), 14)
-        
         try:
             font_title = ImageFont.truetype(font_file, font_size)
             font_badge = ImageFont.truetype(font_file, int(1080 * 0.09))
-        except Exception as e:
-            log.error(f"Font load error: {e}")
+        except:
             font_title = ImageFont.load_default()
             font_badge = ImageFont.load_default()
 
@@ -83,12 +75,17 @@ def merge_and_split_segments(segments, max_chars=150):
             else:
                 merged.append(current); current = {"start": seg["start"], "end": seg["end"], "text": seg["text"]}
     if current: merged.append(current)
+    
     final_segments = []
     for seg in merged:
         text = seg["text"].replace("\n", " ").strip()
-        if len(text) <= Config.MAX_CHARS_PER_SUB: final_segments.append(seg)
+        # 🌟 اگر جمله از حد مجاز (۷۰ کاراکتر) کمتر بود، همون رو بذار
+        if len(text) <= Config.MAX_CHARS_PER_SUB: 
+            final_segments.append(seg)
         else:
-            words = text.split(); chunks, cur_words, cur_len = [], [], 0
+            # 🌟 شکستن هوشمند بر اساس کلمات (جلوگیری از تک‌کلمه‌ای شدن)
+            words = text.split()
+            chunks, cur_words, cur_len = [], [], 0
             for w in words:
                 if cur_len + len(w) + 1 <= Config.MAX_CHARS_PER_SUB:
                     cur_words.append(w); cur_len += len(w) + 1
@@ -96,6 +93,7 @@ def merge_and_split_segments(segments, max_chars=150):
                     if cur_words: chunks.append(" ".join(cur_words))
                     cur_words = [w]; cur_len = len(w) + 1
             if cur_words: chunks.append(" ".join(cur_words))
+            
             total_dur = seg["end"] - seg["start"]; total_chars = sum(len(c) for c in chunks); cur_time = seg["start"]
             for chunk in chunks:
                 dur = (len(chunk) / total_chars) * total_dur if total_chars else 0
